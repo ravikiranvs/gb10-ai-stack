@@ -1,0 +1,100 @@
+{
+	auto_https off
+	admin off
+	servers {
+		trusted_proxies static 127.0.0.1/32
+	}
+}
+
+(authelia) {
+	forward_auth 127.0.0.1:9091 {
+		uri /auth/api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+}
+
+(stream) {
+	flush_interval -1
+	transport http {
+		read_timeout 15m
+	}
+}
+
+http://:9080 {
+	bind 127.0.0.1
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Login portal
+	handle /auth* {
+		reverse_proxy 127.0.0.1:9091
+	}
+
+	# Model API: machine clients authenticate with LiteLLM virtual keys
+	handle /llm/v1/* {
+		request_header -Remote-User
+		request_header -Remote-Groups
+		request_header -Remote-Email
+		request_header -Remote-Name
+		reverse_proxy 127.0.0.1:4000 {
+			import stream
+		}
+	}
+
+	# LiteLLM admin UI
+	handle /llm* {
+		import authelia
+		reverse_proxy 127.0.0.1:4000
+	}
+
+	# OpenClaw Control UI + WebSocket (gateway.controlUi.basePath = /openclaw)
+	handle /openclaw* {
+		import authelia
+		reverse_proxy 127.0.0.1:18789 {
+			import stream
+		}
+	}
+
+	# Grafana (serve_from_sub_path)
+	handle /grafana* {
+		import authelia
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	# ComfyUI (prefix stripped after auth)
+	redir /comfy /comfy/
+	handle /comfy/* {
+		route {
+			import authelia
+			uri strip_prefix /comfy
+			reverse_proxy 127.0.0.1:8188 {
+				import stream
+			}
+		}
+	}
+
+	# Admin dashboard (prefix stripped after auth; uvicorn --root-path /admin)
+	redir /admin /admin/
+	handle /admin/* {
+		route {
+			import authelia
+			uri strip_prefix /admin
+			reverse_proxy 127.0.0.1:9000
+		}
+	}
+
+	handle {
+		redir * /admin/ 302
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

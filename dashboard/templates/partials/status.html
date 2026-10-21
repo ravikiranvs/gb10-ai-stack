@@ -1,0 +1,87 @@
+{% set m = s.memory %}{% set g = s.gpu %}
+<div class="card">
+  <h2>System</h2>
+  <div class="bar"><span style="width: {{ m.used_pct or 0 }}%"></span></div>
+  <div class="stats">
+    <div>Unified memory <b>{% if m.total_gib %}{{ (m.total_gib - m.available_gib) | round(1) }} / {{ m.total_gib }} GiB{% else %}n/a{% endif %}</b></div>
+    <div>GPU <b>{{ g.util_pct | int if g.util_pct is not none else "n/a" }}%</b></div>
+    <div>Temp <b>{{ g.temp_c | int if g.temp_c is not none else "n/a" }} °C</b></div>
+    <div>Power <b>{{ g.power_w | round(1) if g.power_w is not none else "n/a" }} W</b></div>
+    <div>GPU collector
+      <b>{% if g.collector_age_s is none %}<span class="dot bad"></span>no data
+         {% elif g.collector_age_s > 60 %}<span class="dot bad"></span>stale {{ g.collector_age_s }}s
+         {% else %}<span class="dot ok"></span>{{ g.collector_age_s }}s ago{% endif %}</b></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Models</h2>
+  <table>
+    <thead><tr><th>Model</th><th>State</th><th>Idle</th><th></th></tr></thead>
+    <tbody>
+    {% if not s.model_runner_reachable %}
+      <tr><td colspan="4"><span class="dot bad"></span>model-runner unreachable</td></tr>
+    {% endif %}
+    {% for model in s.models %}
+      {% set st = model.state %}
+      <tr>
+        <td>{{ model.name }}<br><small style="color:var(--muted)">{{ model.id }}</small></td>
+        <td><span class="dot {{ 'ok' if st == 'ready' else ('warn' if st in ['starting', 'stopping'] else '') }}"></span>{{ st }}</td>
+        <td>—</td>
+        <td>
+          {% if who.admin %}
+            {% if st == 'stopped' %}
+              <button hx-post="api/models/{{ model.id }}/up" hx-target="#status">Up</button>
+            {% else %}
+              <button hx-post="api/models/{{ model.id }}/down" hx-target="#status"
+                      hx-confirm="Stop {{ model.id }}?">Down</button>
+            {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    {% set im = s.image %}
+      <tr>
+        <td>Image · ComfyUI<br><small style="color:var(--muted)">flux-schnell workflow</small></td>
+        <td>
+          {% if not im.reachable %}<span class="dot bad"></span>unreachable
+          {% else %}<span class="dot {{ 'ok' if im.state in ['hot', 'busy'] else '' }}"></span>{{ im.state }}{% endif %}
+        </td>
+        <td>{% if im.state == 'hot' %}{{ (im.idle_seconds // 60) }}m / {{ (im.idle_limit_seconds // 60) }}m{% else %}—{% endif %}</td>
+        <td>
+          {% if who.admin and im.reachable %}
+            <button hx-post="api/image/warm" hx-target="#status">Warm</button>
+            <button hx-post="api/image/free" hx-target="#status">Free</button>
+          {% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Agent runtime</h2>
+  <div class="stats">
+    <div><span class="dot {{ 'ok' if s.openshell_gateway else 'bad' }}"></span>OpenShell gateway</div>
+    <div>
+      {% if s.sandbox %}
+        <span class="dot {{ 'ok' if s.sandbox.state == 'running' else 'bad' }}"></span>Sandbox {{ s.sandbox.name }} · {{ s.sandbox.status }}
+      {% else %}
+        <span class="dot bad"></span>Sandbox not found
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Containers</h2>
+  {% if not s.docker_reachable %}<p><span class="dot bad"></span>docker-socket-proxy unreachable</p>{% endif %}
+  <div class="grid">
+    {% for svc in s.services %}
+      <div class="svc">
+        <span class="dot {{ 'ok' if svc.state == 'running' else ('warn' if svc.state in ['restarting', 'created'] else 'bad') }}"></span>{{ svc.name }}
+        <small>{{ svc.status }}</small>
+      </div>
+    {% endfor %}
+  </div>
+</div>

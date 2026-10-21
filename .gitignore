@@ -1,0 +1,7 @@
+.env
+secrets/*
+!secrets/.gitkeep
+authelia/users.yml
+data/
+__pycache__/
+*.pyc

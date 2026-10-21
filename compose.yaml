@@ -1,0 +1,310 @@
+name: ai-stack
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+networks:
+  ai: {}
+  obs: {}
+
+secrets:
+  authelia_jwt:
+    file: ./secrets/authelia_jwt
+  authelia_session:
+    file: ./secrets/authelia_session
+  authelia_storage_key:
+    file: ./secrets/authelia_storage_key
+  litellm_master_key:
+    file: ./secrets/litellm_master_key
+  litellm_db_password:
+    file: ./secrets/litellm_db_password
+  hf_token:
+    file: ./secrets/hf_token
+
+volumes:
+  authelia_data: {}
+  litellm_db: {}
+  prometheus_data: {}
+  loki_data: {}
+  tempo_data: {}
+  grafana_data: {}
+  alloy_data: {}
+  textfile: {}
+
+services:
+
+  # ─────────────────────────── Edge ───────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    network_mode: host                     # reaches the OpenClaw sandbox forward on host 127.0.0.1:18789
+    restart: unless-stopped
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+
+  authelia:
+    image: authelia/authelia:4
+    restart: unless-stopped
+    networks: [ai]
+    ports: ["127.0.0.1:9091:9091"]
+    environment:
+      X_AUTHELIA_CONFIG_FILTERS: template
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /run/secrets/authelia_jwt
+      AUTHELIA_SESSION_SECRET_FILE: /run/secrets/authelia_session
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage_key
+      TZ: ${TZ}
+    secrets: [authelia_jwt, authelia_session, authelia_storage_key]
+    volumes:
+      - ./authelia:/config:ro
+      - authelia_data:/data
+
+  # ─────────────────────────── LLM gateway ───────────────────────────
+  litellm-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    networks: [ai]
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD_FILE: /run/secrets/litellm_db_password
+    secrets: [litellm_db_password]
+    volumes:
+      - litellm_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  litellm:
+    image: ${LITELLM_IMAGE}
+    restart: unless-stopped
+    networks: [ai, obs]
+    ports:
+      - "127.0.0.1:4000:4000"
+      - "${DOCKER_BRIDGE_IP}:4000:4000"    # reachable from OpenShell sandboxes as host.openshell.internal
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    env_file: ./secrets/litellm.env        # LITELLM_MASTER_KEY, DATABASE_URL (created by scripts/init-secrets.sh)
+    environment:
+      SERVER_ROOT_PATH: /llm
+      OTEL_EXPORTER: otlp_http
+      OTEL_ENDPOINT: http://alloy:4318
+      OTEL_SERVICE_NAME: litellm
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    depends_on:
+      litellm-db:
+        condition: service_healthy
+
+  # ─────────────────────────── Models ───────────────────────────
+  model-runner:
+    <<: *gpu
+    build:
+      context: ./model-runner
+      args:
+        VLLM_IMAGE: ${VLLM_IMAGE}
+        LLAMA_SWAP_VERSION: ${LLAMA_SWAP_VERSION}
+    restart: unless-stopped
+    networks: [ai, obs]
+    ipc: host
+    secrets: [hf_token]
+    environment:
+      HF_TOKEN_PATH: /run/secrets/hf_token
+      HF_HOME: /models/hf
+      OTEL_EXPORTER_OTLP_TRACES_INSECURE: "true"
+    volumes:
+      - ${MODELS_DIR}/hf:/models/hf
+      - ./model-runner/llama-swap.yaml:/config/config.yaml:ro
+
+  comfyui:
+    <<: *gpu
+    build:
+      context: ./comfyui
+      args:
+        BASE_IMAGE: ${PYTORCH_IMAGE}
+        COMFYUI_REF: ${COMFYUI_REF}
+    restart: unless-stopped
+    networks: [ai]
+    ports: ["127.0.0.1:8188:8188"]
+    volumes:
+      - ${MODELS_DIR}/comfy:/opt/ComfyUI/models
+      - ./data/comfy-output:/opt/ComfyUI/output
+      - ./comfyui/workflows:/opt/ComfyUI/user/default/workflows
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8188/system_stats"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  comfy-mcp:
+    build: ./comfy-mcp
+    restart: unless-stopped
+    networks: [ai]
+    environment:
+      COMFY_URL: http://comfyui:8188
+      COMFY_WORKFLOW: /app/workflows/flux-schnell-api.json
+      COMFY_DEFAULT_STEPS: ${COMFY_DEFAULT_STEPS}
+      MCP_BIND: 0.0.0.0:9100
+    volumes:
+      - ./comfyui/workflows:/app/workflows:ro
+    depends_on:
+      comfyui:
+        condition: service_healthy
+
+  # ─────────────────────────── Agent runtime ───────────────────────────
+  # Follow upstream OpenShell deploy/docker/docker-compose.yml for any additional env/volumes.
+  openshell-gateway:
+    image: ${OPENSHELL_GATEWAY_IMAGE}
+    restart: unless-stopped
+    networks: [ai]
+    ports:
+      - "${DOCKER_BRIDGE_IP}:8080:8080"    # must stay 8080:8080 (sandbox callback port)
+    group_add: ["${DOCKER_GID}"]
+    environment:
+      OPENSHELL_GRPC_ENDPOINT: http://host.openshell.internal:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/openshell:/var/lib/openshell   # identical path on host and in container
+
+  # ─────────────────────────── Control ───────────────────────────
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    restart: unless-stopped
+    networks: [ai]
+    environment:
+      CONTAINERS: 1
+      INFO: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  admin-dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    networks: [ai, obs]
+    ports: ["127.0.0.1:9000:9000"]
+    environment:
+      LLAMA_SWAP_URL: http://model-runner:8000
+      COMFY_URL: http://comfyui:8188
+      COMFY_WORKFLOW: /app/workflows/flux-schnell-api.json
+      COMFY_IDLE_MINUTES: ${COMFY_IDLE_MINUTES}
+      OPENSHELL_GATEWAY_URL: http://openshell-gateway:8080
+      DOCKER_URL: http://docker-socket-proxy:2375
+      PROMETHEUS_URL: http://prometheus:9090
+      ADMIN_GROUP: admins
+      NEMOCLAW_SANDBOX: ${NEMOCLAW_SANDBOX}
+    volumes:
+      - ./comfyui/workflows:/app/workflows:ro
+
+  # ─────────────────────────── Observability ───────────────────────────
+  alloy:
+    image: ${ALLOY_IMAGE}
+    restart: unless-stopped
+    networks: [obs, ai]
+    ports:
+      - "${DOCKER_BRIDGE_IP}:4318:4318"    # OTLP/HTTP for the OpenClaw sandbox
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE}
+    restart: unless-stopped
+    networks: [obs, ai]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-remote-write-receiver
+    secrets: [litellm_master_key]
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  loki:
+    image: ${LOKI_IMAGE}
+    restart: unless-stopped
+    networks: [obs]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./observability/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+
+  tempo:
+    image: ${TEMPO_IMAGE}
+    restart: unless-stopped
+    networks: [obs]
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./observability/tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo_data:/var/tempo
+
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    restart: unless-stopped
+    networks: [obs]
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_SERVER_ROOT_URL: https://${PUBLIC_HOST}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_PROXY_ENABLED: "true"
+      GF_AUTH_PROXY_HEADER_NAME: Remote-User
+      GF_AUTH_PROXY_HEADER_PROPERTY: username
+      GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
+      GF_AUTH_PROXY_HEADERS: "Email:Remote-Email Name:Remote-Name Groups:Remote-Groups"
+      GF_AUTH_PROXY_WHITELIST: "172.16.0.0/12, 127.0.0.1"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Admin
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+
+  node-exporter:
+    image: ${NODE_EXPORTER_IMAGE}
+    restart: unless-stopped
+    networks: [obs]
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - /:/host:ro,rslave
+      - textfile:/textfile:ro
+
+  cadvisor:
+    image: ${CADVISOR_IMAGE}
+    restart: unless-stopped
+    networks: [obs]
+    privileged: true
+    devices: ["/dev/kmsg"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  gpu-exporter:
+    build: ./observability/gpu-exporter
+    restart: unless-stopped
+    runtime: nvidia
+    network_mode: none
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
+      INTERVAL_SECONDS: "10"
+    volumes:
+      - textfile:/textfile

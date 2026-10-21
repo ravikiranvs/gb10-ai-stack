@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GB10 · AI Stack</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      --bg: #0b1020; --panel: #111833; --line: #1f2a4d; --text: #e5e9f5; --muted: #8a94b8;
+      --ok: #4ade80; --warn: #facc15; --bad: #f87171; --accent: #60a5fa;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+           background: var(--bg); color: var(--text); }
+    header { display: flex; justify-content: space-between; align-items: center;
+             padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+    header .who { color: var(--muted); }
+    main { padding: 24px; max-width: 1200px; margin: 0 auto; display: grid; gap: 20px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+    .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 500; }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
+    .ok { background: var(--ok); } .warn { background: var(--warn); } .bad { background: var(--bad); }
+    .bar { height: 10px; background: var(--line); border-radius: 6px; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), #a78bfa); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+    .svc { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+    .svc small { color: var(--muted); display: block; }
+    button { background: #1d2750; color: var(--text); border: 1px solid #2c3a70; border-radius: 8px;
+             padding: 5px 12px; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button[disabled] { opacity: .4; cursor: not-allowed; }
+    .links a { color: var(--accent); margin-right: 16px; text-decoration: none; }
+    .stats { display: flex; gap: 24px; flex-wrap: wrap; color: var(--muted); margin-top: 10px; }
+    .stats b { color: var(--text); }
+    .htmx-request { opacity: .6; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GB10 · AI Stack</h1>
+    <div class="who">{{ who.user }}{% if who.admin %} · admin{% endif %} · <a href="/auth/logout" style="color:var(--accent)">sign out</a></div>
+  </header>
+  <main>
+    <div id="status" hx-get="partials/status" hx-trigger="load, every 5s" hx-swap="innerHTML">
+      <div class="card">Loading…</div>
+    </div>
+    <div class="card links">
+      <h2>Apps</h2>
+      <a href="/openclaw/">OpenClaw</a>
+      <a href="/llm/ui/">LiteLLM</a>
+      <a href="/grafana/">Grafana</a>
+      <a href="/comfy/">ComfyUI</a>
+    </div>
+  </main>
+</body>
+</html>
