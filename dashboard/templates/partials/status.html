@@ -62,7 +62,6 @@
 <div class="card">
   <h2>Agent runtime</h2>
   <div class="stats">
-    <div><span class="dot {{ 'ok' if s.openshell_gateway else 'bad' }}"></span>OpenShell gateway</div>
     <div>
       {% if s.sandbox %}
         <span class="dot {{ 'ok' if s.sandbox.state == 'running' else 'bad' }}"></span>Sandbox {{ s.sandbox.name }} · {{ s.sandbox.status }}

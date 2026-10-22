@@ -40,7 +40,7 @@
 | Model API | llama-swap exposed directly | **LiteLLM gateway** → llama-swap → vLLM |
 | llama-swap | Host systemd, spawning `docker run` | **Container** — llama-swap baked into the vLLM image, spawns `vllm serve` as child processes |
 | Dashboard | Host systemd | **Container** + read-only docker-socket-proxy |
-| OpenShell gateway | Host process | **Container** (`ghcr.io/nvidia/openshell/gateway`) |
+| OpenShell gateway | Host process | **Created and managed by NemoClaw** (not in compose; NemoClaw supports an external gateway only under systemd on `127.0.0.1`) |
 | Monitoring | none | **Grafana · Prometheus · Loki · Tempo · Alloy** + GB10-aware GPU exporter + OpenClaw/LiteLLM/vLLM OTel traces |
 
 ---
@@ -55,7 +55,7 @@
 | LLM gateway | **LiteLLM Proxy** + Postgres | Virtual keys, budgets, rate limits, fallbacks, Prometheus + OTel, MCP gateway |
 | Model runner | **llama-swap + vLLM** (one container) | Spawns/kills `vllm serve` per model on demand |
 | Agent LLM | `nvidia/Qwen3.6-35B-A3B-NVFP4` | NVIDIA's DGX Spark default for OpenClaw |
-| Vision | Agent model if multimodal, else `Qwen/Qwen3-VL-30B-A3B-Instruct` | |
+| Vision | The agent model itself (Qwen3.6-35B-A3B is natively multimodal; there is no separate vision model) | Tested: accepts images |
 | Image gen | **ComfyUI** + FLUX.1-schnell / Z-Image-Turbo, **comfy-mcp** | |
 | Agent | **OpenClaw** in an **OpenShell** sandbox, onboarded by **NemoClaw** | |
 | Admin | **admin-dashboard** (FastAPI + HTMX) | Status, Up/Down, idle unloader |
@@ -94,7 +94,6 @@ flowchart TB
         subgraph MODELS["Model runner · single container"]
             LS["llama-swap :8000"]
             VA["vllm serve · agent<br/>:10001"]
-            VV["vllm serve · vision<br/>:10002"]
         end
 
         subgraph IMG["Image generation"]
@@ -102,7 +101,7 @@ flowchart TB
         end
 
         subgraph AGENT["Agent runtime"]
-            OSG["openshell-gateway<br/>container · :8080"]
+            OSG["OpenShell gateway<br/>NemoClaw-managed"]
             SBX["OpenShell sandbox<br/>OpenClaw · Landlock · seccomp · netns"]
         end
 
@@ -131,7 +130,6 @@ flowchart TB
     LITE -- "OpenAI API" --> LS
     LITE -- "MCP" --> CMCP
     LS -- "spawn · proxy · ttl kill" --> VA
-    LS -.-> VV
     CMCP --> COMFY
 
     DASH --> LS
@@ -163,7 +161,7 @@ flowchart TB
     class TSD,CADDY,AUTH edge
     class DASH,GRAF,COMFY,OC app
     class LITE,PG gw
-    class LS,VA,VV,CMCP model
+    class LS,VA,CMCP model
     class OSG,SBX agent
     class ALLOY,PROM,LOKI,TEMPO,EXP obs
 ```
@@ -176,11 +174,12 @@ flowchart TB
 
 | Path | Upstream | Auth | Prefix handling | Sub-path support |
 |---|---|---|---|---|
-| `/` | redirect → `/admin/` | — | — | — |
+| `/` and any unmatched path | 302 redirect → `/admin/` | — | — | — |
 | `/auth/*` | authelia `127.0.0.1:9091` | public (login portal) | kept · `server.address: …/auth` | native |
 | `/admin/*` | admin-dashboard `127.0.0.1:9000` | Authelia · `admins` · 2FA | stripped · `uvicorn --root-path /admin` | native |
 | `/openclaw/*` | OpenClaw `127.0.0.1:18789` | Authelia → OpenClaw `trusted-proxy` | kept · `gateway.controlUi.basePath: "/openclaw"` | native |
-| `/llm/v1/*` | litellm `127.0.0.1:4000` | **LiteLLM virtual key** (Bearer) | kept · `SERVER_ROOT_PATH=/llm` | native |
+| `/llm/v1/*` | litellm `127.0.0.1:4000` | **LiteLLM virtual key** (Bearer); Authelia rule is `bypass`, Caddy strips `Remote-*` | kept · `SERVER_ROOT_PATH=/llm` | native |
+| `/llm/<server>/mcp` | litellm `127.0.0.1:4000` | **LiteLLM virtual key** (Bearer, with per-key MCP grants); Caddy skips Authelia and strips `Remote-*` | kept | native |
 | `/llm/*` (UI) | litellm `127.0.0.1:4000` | Authelia · `admins` · 2FA + LiteLLM login | kept | native |
 | `/grafana/*` | grafana `127.0.0.1:3000` | Authelia · `admins` → Grafana auth-proxy | kept · `serve_from_sub_path = true` | native |
 | `/comfy/*` | comfyui `127.0.0.1:8188` | Authelia · `admins` · 2FA | stripped | **fragile** — see note |
@@ -255,8 +254,10 @@ sequenceDiagram
 | Group | Access |
 |---|---|
 | `admins` | Everything (`/admin`, `/grafana`, `/comfy`, `/llm` UI, `/openclaw`) |
-| `users` | `/openclaw` only |
+| `users` | `/openclaw` only (`two_factor`) |
 | everyone else | **deny** (`default_policy: deny`) |
+
+Session: 12 h expiry, 1 h inactivity; cookie scoped to `PUBLIC_HOST`; the notifier writes to a file in `/data` (no SMTP), so TOTP/WebAuthn enrolment links are read from `notification.txt`. Grafana auto-signs-up proxy users with the **Admin** org role (only `admins` can reach it) and trusts the proxy header only from `172.16.0.0/12` and `127.0.0.1`.
 
 ---
 
@@ -267,13 +268,13 @@ sequenceDiagram
 | Capability | Use here |
 |---|---|
 | OpenAI-compatible API | Single base URL `https://gb10…/llm/v1` for everything |
-| Virtual keys | `openclaw-sandbox`, `laptop`, `scripts` — revocable, per-key model allow-lists |
-| Budgets & rate limits | RPM/TPM caps per key; protects the box from runaway agents |
-| Model aliases & fallbacks | `agent` → `qwen3.6-35b`; vision fallback; optional cloud fallback |
+| Virtual keys | `openclaw-sandbox` (agent, qwen3.6-35b · 60 RPM), `laptop` (any model · 30 RPM · $50 / 30 d), `scripts` (`agent` only · 10 RPM) — created by `scripts/create-litellm-keys.sh` |
+| Budgets & rate limits | RPM caps on all three keys, a budget on `laptop`; protects the box from runaway agents |
+| Model aliases & retries | `agent` → `qwen3.6-35b`; `num_retries: 1`; `drop_params: true`. **No fallbacks are configured** (a cloud fallback would be an addition) |
 | Timeouts | 900 s to cover vLLM cold starts |
 | Observability | Prometheus `/metrics` (latency, TTFT, tokens, spend per key) + **OTel traces** |
-| **MCP gateway** | Fronts `comfy-mcp` so the sandbox only needs **one** egress destination |
-| Admin UI | `/llm/ui` — keys, usage, logs |
+| **MCP gateway** | Fronts `comfy-mcp` (`comfy_image`, the only MCP server configured) so the sandbox only needs **one** egress destination. With `SERVER_ROOT_PATH=/llm` the MCP URL is `/llm/comfy_image/mcp` (not `/llm/mcp/`, which LiteLLM reads as a server named `llm`); tools are named `<server>-<tool>`, e.g. `comfy_image-generate_image`. Keys have **no** MCP access by default; `create-litellm-keys.sh` grants all configured servers to `openclaw-sandbox` only |
+| Admin UI | `/llm/ui` — keys, usage, logs (served under `SERVER_ROOT_PATH=/llm`; master key and DB URL come from `secrets/litellm.env`) |
 
 ```mermaid
 flowchart LR
@@ -281,9 +282,8 @@ flowchart LR
     LP["Laptop / scripts<br/>key: laptop · scripts"] --> L
     L["LiteLLM<br/>auth · budgets · routing<br/>retries · timeouts"]
     L -- "agent / qwen3.6-35b" --> LS["llama-swap"]
-    L -- "qwen3-vl-30b" --> LS
     L -- "MCP comfy_image" --> M["comfy-mcp"]
-    L -. "optional fallback" .-> CLOUD["Cloud provider"]
+    L -. "not configured" .-> CLOUD["Cloud provider"]
     L --> PG[("postgres<br/>keys · spend")]
 
     classDef g fill:#3b0764,stroke:#e879f9,color:#fae8ff,stroke-width:2px
@@ -298,11 +298,11 @@ flowchart LR
 
 | Component | Containerised? | How | Caveats |
 |---|---|---|---|
-| **llama-swap** | **Yes** | Custom image `FROM nvcr.io/nvidia/vllm` + llama-swap binary. llama-swap spawns `vllm serve` **as child processes** inside the same container | No docker socket needed. Container stays up (tiny); models come and go |
-| **admin-dashboard** | **Yes** | Python image + `openshell` CLI; Docker status via **read-only** `docker-socket-proxy` | Can't call host `nemoclaw`; uses OpenShell gateway API/CLI instead |
-| **OpenShell gateway** | **Yes** | Official `ghcr.io/nvidia/openshell/gateway` with Docker driver: mounts `/var/run/docker.sock`, supervisor binary at **identical host path**, callback `host.openshell.internal:8080` | Port **8080 must be published as 8080**. Socket access ≈ root |
+| **llama-swap** | **Yes** | Custom image `FROM nvcr.io/nvidia/vllm` + llama-swap binary. llama-swap spawns `vllm serve` **as child processes** inside the same container | No docker socket needed. Container stays up (tiny); models come and go. `ipc: host`; HF token via Docker secret; `--watch-config` reloads `llama-swap.yaml` |
+| **admin-dashboard** | **Yes** | `python:3.12-slim` (no `openshell` CLI); Docker status via **read-only** `docker-socket-proxy` (`CONTAINERS=1 INFO=1 NETWORKS=1 POST=0`) | Can't call host `nemoclaw`; it only checks that the sandbox container is running |
+| **OpenShell gateway** | **No — created by NemoClaw** | Started and managed by `nemoclaw onboard` on the host. NemoClaw's external-gateway mode accepts only a systemd-supervised process on `127.0.0.1`, which does not fit a compose container | Sandboxes reach LiteLLM and Alloy through `host.openshell.internal` (the docker0 address) |
 | **OpenClaw sandbox** | Already a container | Created by OpenShell, not by compose | Lifecycle via `nemoclaw` / `openshell` |
-| **NemoClaw** | **No — host CLI** | Onboarding & lifecycle commands; not a daemon | Point it at the containerised gateway (verify "reuse existing gateway") |
+| **NemoClaw** | **No — host CLI** | Onboarding & lifecycle commands; not a daemon. Creates the OpenShell gateway and the sandbox | Its docs name the inference and MCP variables used in 13.2 |
 | **tailscaled** | Host (recommended) | Funnel to host-loopback Caddy | Can be containerised with `network_mode: host` if desired |
 
 ### Why llama-swap inside the vLLM image
@@ -337,25 +337,25 @@ flowchart LR
 
 | # | Service | Image (arm64) | Host publish | Docker net | Lifecycle |
 |---|---|---|---|---|---|
-| 1 | caddy | `caddy:2-alpine` | `127.0.0.1:9080` (host network) | host | always |
-| 2 | authelia | `authelia/authelia:4` | `127.0.0.1:9091` | `ai` | always |
+| 1 | caddy | `caddy:2.11.7-alpine` | `127.0.0.1:9080` (host network) | host | always |
+| 2 | authelia | `authelia/authelia:4.39.28` | `127.0.0.1:9091` | `ai` | always |
 | 3 | litellm | `ghcr.io/berriai/litellm:<pinned>` | `127.0.0.1:4000`, `172.17.0.1:4000` | `ai`, `obs` | always |
-| 4 | litellm-db | `postgres:17-alpine` | — | `ai` | always |
+| 4 | litellm-db | `postgres:17.11-alpine` | — | `ai` | always |
 | 5 | model-runner | built: `nvcr.io/nvidia/vllm:<TAG>` + llama-swap | — | `ai`, `obs` | always · **models on demand** |
 | 6 | comfyui | built: `nvcr.io/nvidia/pytorch:<TAG>-py3` | `127.0.0.1:8188` | `ai` | always · **weights on demand** |
 | 7 | comfy-mcp | built: `python:3.12-slim` | — | `ai` | always |
-| 8 | openshell-gateway | `ghcr.io/nvidia/openshell/gateway:<pinned>` | `172.17.0.1:8080` | `ai` | always |
+| 8 | *(OpenShell gateway)* | created by `nemoclaw onboard`, not by compose | host-managed | — | always |
 | 9 | *(OpenClaw sandbox)* | NemoClaw blueprint | `127.0.0.1:18789` (forward) | OpenShell-managed | always |
 | 10 | admin-dashboard | built: `python:3.12-slim` | `127.0.0.1:9000` | `ai`, `obs` | always |
-| 11 | docker-socket-proxy | `tecnativa/docker-socket-proxy` | — | `ai` | always |
-| 12 | alloy | `grafana/alloy:<pinned>` | — | `obs` | always |
+| 11 | docker-socket-proxy | `tecnativa/docker-socket-proxy:v0.5.0` (the only service that mounts `docker.sock`, besides cAdvisor; used by admin-dashboard and Alloy) | — | `ai` | always |
+| 12 | alloy | `grafana/alloy:<pinned>` | `172.17.0.1:4318` (OTLP/HTTP for the sandbox) | `obs`, `ai` | always |
 | 13 | prometheus | `prom/prometheus:<pinned>` | — | `obs`, `ai` | always |
 | 14 | loki | `grafana/loki:<pinned>` | — | `obs` | always |
 | 15 | tempo | `grafana/tempo:<pinned>` | — | `obs` | always |
 | 16 | grafana | `grafana/grafana-oss:<pinned>` | `127.0.0.1:3000` | `obs` | always |
 | 17 | node-exporter | `prom/node-exporter:<pinned>` | — | `obs` | always |
-| 18 | cadvisor | `gcr.io/cadvisor/cadvisor:<pinned ≥ Docker 25 support>` | — | `obs` | always |
-| 19 | gpu-exporter | built: `ubuntu:24.04` + `nvidia-smi` loop | — | (textfile volume) | always |
+| 18 | cadvisor | `gcr.io/cadvisor/cadvisor:<pinned ≥ Docker 25 support>` | — | `obs` | always · **privileged** |
+| 19 | gpu-exporter | built: `ubuntu:24.04` + `nvidia-smi` loop (GPU via the shared `deploy…devices` block, same as model-runner and comfyui) | — | none (`network_mode: none`; shares the `textfile` volume) | always |
 
 > `172.17.0.1` is the default `docker0` bridge address (`host.openshell.internal` for sandboxes). Confirm with `ip -4 addr show docker0`. It is **not** reachable from outside the host.
 
@@ -377,13 +377,13 @@ flowchart TB
     end
     subgraph BR["docker0 bridge 172.17.0.1 · sandbox-reachable"]
         B1["4000 litellm"]
-        B2["8080 openshell-gateway"]
+        B3["4318 alloy OTLP/HTTP"]
     end
     subgraph INT["Internal only · docker networks ai / obs"]
-        I1["model-runner :8000 · :10001 · :10002"]
+        I1["model-runner :8000 · :10001"]
         I2["comfy-mcp :9100"]
         I3["litellm-db :5432"]
-        I4["prometheus · loki · tempo · alloy"]
+        I4["prometheus · loki · tempo · alloy :4317"]
         I5["exporters · socket-proxy"]
     end
     FUN --> L1
@@ -394,7 +394,7 @@ flowchart TB
     classDef i fill:#1f2937,stroke:#9ca3af,color:#f3f4f6
     class FUN p
     class L1,L2,L3,L4,L5,L6,L7 l
-    class B1,B2 b
+    class B1,B2,B3 b
     class I1,I2,I3,I4,I5 i
 ```
 
@@ -410,12 +410,12 @@ flowchart TB
 | **Unified memory** | `/proc/meminfo` (`MemAvailable`, swap) | node-exporter | Prometheus | Grafana |
 | Host CPU / disk / net | kernel | node-exporter | Prometheus | Grafana |
 | Container CPU / mem | cgroups | cAdvisor | Prometheus | Grafana |
-| **vLLM** (running/waiting reqs, KV-cache %, TTFT, TPOT, tokens/s) | `vllm serve` `/metrics` on `:10001/:10002` | Prometheus scrape | Prometheus | Grafana (vLLM dashboard) |
+| **vLLM** (running/waiting reqs, KV-cache %, TTFT, TPOT, tokens/s) | `vllm serve` `/metrics` on `:10001` | Prometheus scrape | Prometheus | Grafana (vLLM dashboard) |
 | vLLM traces | `--otlp-traces-endpoint` | Alloy | Tempo | Grafana |
-| **LiteLLM** (requests, latency, TTFT, tokens, spend per key/model, failures) | `/metrics` + OTel callback | Prometheus + Alloy | Prometheus + Tempo | Grafana |
+| **LiteLLM** (requests, latency, TTFT, tokens, spend per key/model, failures) | `/llm/metrics` (Prometheus authenticates with the master key) + OTel callback (OTLP/HTTP → `alloy:4318`) | Prometheus + Alloy | Prometheus + Tempo | Grafana |
 | **OpenClaw traces** (run, model call, tool exec, skill, message flow) | `diagnostics-otel` plugin, OTLP/HTTP | Alloy | Tempo | Grafana |
 | OpenClaw metrics (tokens, cost, run duration, tool usage, queues) | `diagnostics-otel` | Alloy → remote-write | Prometheus | Grafana |
-| Logs (all containers) | Docker | Alloy | Loki | Grafana |
+| Logs (all containers) | Docker API via `docker-socket-proxy` (`tcp://docker-socket-proxy:2375`) | Alloy | Loki (labels `container`, `service`) | Grafana |
 | Model up/down state | `up{job="vllm-*"}` (scrape fails when scaled to zero) | Prometheus | Prometheus | Grafana + dashboard |
 
 ### Topology
@@ -472,7 +472,7 @@ openclaw.run ──────────────────────�
 │  └─ litellm.request (qwen3.6-35b, key=openclaw-sandbox) ── 9.7 s
 │     └─ vllm.llm_request ── ttft 0.42 s · 612 out tokens ── 9.6 s
 ├─ openclaw.tool.execution  generate_image ─────── 4.1 s
-│  └─ litellm.mcp.call comfy_image.generate_image ── 4.0 s
+│  └─ litellm.mcp.call comfy_image-generate_image ── 4.0 s
 └─ openclaw.model.call ─ 0.2 s
 ```
 
@@ -480,24 +480,26 @@ openclaw.run ──────────────────────�
 
 `dcgm-exporter` does not work properly on GB10 unified memory, and NVML returns `N/A` for many memory fields. Use:
 
-- `nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm` → `.prom` textfile every 10 s
+- `nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm` → `gpu.prom` textfile every 10 s (`gb10_gpu_*` metrics; fields that return `N/A` are exported as `NaN`)
 - `/proc/meminfo` `MemAvailable` + `SwapFree` for real allocatable memory (NVIDIA's own guidance for UMA)
-- A **staleness alert** on the textfile timestamp so a dead collector doesn't look like a healthy idle GPU
+- `gb10_gpu_collector_timestamp_seconds` and `gb10_gpu_up` so a dead collector doesn't look like a healthy idle GPU (the overview board has a collector-age panel; no alert rule is provisioned yet)
 
 Reference implementation worth reading: `cadaverine/dgx-spark-observability` (GB10 quirks documented).
 
 ### Grafana dashboards
 
-| Dashboard | Source |
+Provisioned: **GB10 · AI Stack Overview** (`gb10-overview.json`, folder *AI Stack*) with rows *Host · GB10* (unified memory, GPU util/temp/power, collector age, memory/swap, top-10 container memory), *Models* (up/down, vLLM running/waiting, p95 TTFT, tokens/s) and *Gateway · LiteLLM* (requests/s by key, failures/s). Datasources link traces ↔ logs ↔ metrics.
+
+| Dashboard | Status |
 |---|---|
-| **GB10 Host** | Custom: GPU util/temp/power, `MemAvailable`, swap, per-container memory, model up/down |
-| **vLLM** | Upstream vLLM Grafana JSON (examples in vLLM repo) |
-| **LiteLLM** | Upstream LiteLLM Grafana JSON |
-| **OpenClaw** | Custom from exported metric names (tokens, cost, run duration, tool usage) |
+| **GB10 Host + vLLM + LiteLLM basics** | **Shipped** as the single overview board above |
+| **vLLM** (full) | Not shipped — import upstream vLLM Grafana JSON |
+| **LiteLLM** (full) | Not shipped — import upstream LiteLLM Grafana JSON |
+| **OpenClaw** | Not shipped — build from exported metric names (tokens, cost, run duration, tool usage) |
 | **Traces** | Grafana Explore → Tempo (service graph via metrics-generator) |
 | **Logs** | Grafana Explore → Loki, label `container` |
 
-### Suggested alerts (Grafana alerting)
+### Suggested alerts (Grafana alerting — **not provisioned**; create them in Grafana)
 
 | Alert | Condition |
 |---|---|
@@ -517,19 +519,17 @@ Reference implementation worth reading: `cadaverine/dgx-spark-observability` (GB
 pie showData title Unified memory · 128 GB · all services hot
     "Agent LLM · vLLM @ 0.30" : 36
     "Image gen · FLUX schnell fp8 + T5" : 24
-    "Vision VLM · vLLM @ 0.20 (optional)" : 24
     "OS · Docker · sandbox · page cache" : 14
     "Gateway · auth · observability" : 6
-    "Headroom" : 24
+    "Headroom" : 48
 ```
 
 | Service | Setting | Approx. |
 |---|---|---|
 | vllm agent | `--gpu-memory-utilization 0.30 --max-model-len 65536 --max-num-seqs 4` | ~36 GB |
-| vllm vision | `--gpu-memory-utilization 0.20 --max-model-len 32768 --max-num-seqs 2` | ~24 GB |
 | comfyui | FLUX.1-schnell fp8 + T5-XXL fp8 | ~20–25 GB hot · ~1 GB after `/free` |
 | litellm + postgres + authelia + caddy | — | ~1.5 GB |
-| prometheus + loki + tempo + grafana + alloy + exporters | 30-day retention | ~4–5 GB |
+| prometheus + loki + tempo + grafana + alloy + exporters | Prometheus/Loki 30 d, Tempo 14 d retention | ~4–5 GB |
 
 > Keep **Σ gpu-memory-utilization × 121 GB + ComfyUI peak + 20 GB < 115 GB**.
 
@@ -558,11 +558,12 @@ stateDiagram-v2
     Hot --> Unloaded: idle ≥ 10 min → POST /free<br/>or dashboard Free
 ```
 
+> llama-swap runs a single model (the agent), which also handles image input. ComfyUI is separate and is freed by the dashboard's idle watcher.
+
 | Model | Owner | Idle policy | Cold start |
 |---|---|---|---|
-| Agent LLM | llama-swap (in model-runner) | `ttl: 1800` | ~2–5 min |
-| Vision VLM | llama-swap | `ttl: 900` | ~2–4 min |
-| Image gen | dashboard idle watcher | 10 min → `/free` | ~20–60 s |
+| Agent LLM | llama-swap (in model-runner) | `ttl: 1800` | measured: **~330 s** the very first time (empty caches), **~200 s** after that, even in a brand-new container (~130 s of it is loading the 23.5 GB of weights) |
+| Image gen | dashboard idle watcher (polls every 60 s) | `COMFY_IDLE_MINUTES` (10) → `/free` | ~20–60 s |
 
 ---
 
@@ -613,7 +614,7 @@ sequenceDiagram
     participant C as ComfyUI
     participant D as Dashboard watcher
 
-    OC->>L: MCP tools/call comfy_image.generate_image · key
+    OC->>L: MCP tools/call comfy_image-generate_image · POST /llm/comfy_image/mcp · key
     L->>M: forward
     M->>C: POST /prompt
     loop poll
@@ -650,26 +651,30 @@ sequenceDiagram
 
 ## 13. Configuration
 
-All files live in [`ai-stack/`](ai-stack/). Deploy that folder to `/srv/ai-stack` on the GB10.
+All files live at the repository root. Deploy the repo to `/srv/ai-stack` on the GB10 (the compose project name is `ai-stack`).
 
 ### 13.1 Project files
 
 ```text
-ai-stack/
-├── compose.yaml                         # 18 services (the OpenClaw sandbox is created by OpenShell)
-├── .env.example                         # copy → .env (no secrets)
-├── .gitignore
+.                                        # repo root = /srv/ai-stack on the host
+├── gb10-agent-stack.md                  # this document
+├── VARIABLES.md                         # every value to set/check, per file
+├── compose.yaml                         # 17 services (the OpenShell gateway and the OpenClaw sandbox are created by NemoClaw)
+├── .env.example                         # copy → .env (no secrets; image tags are CHANGE_ME placeholders)
+├── .gitignore                           # .env, secrets/*, authelia/users.yml, data/
 ├── scripts/
 │   ├── init-secrets.sh                  # generates secrets/, .env, users.yml (never overwrites)
 │   └── create-litellm-keys.sh           # openclaw-sandbox · laptop · scripts keys → secrets/litellm_keys.json
-├── secrets/                             # git-ignored · chmod 700
+├── secrets/                             # git-ignored · chmod 700 · authelia_{jwt,session,storage_key}, litellm_master_key,
+│                                        #   litellm_db_password, grafana_admin_password, litellm.env, hf_token, litellm_keys.json
+├── data/comfy-output/                   # git-ignored · created by init-secrets.sh
 ├── caddy/Caddyfile
 ├── authelia/
 │   ├── configuration.yml                # templated with PUBLIC_HOST
-│   └── users.yml.example
+│   └── users.yml.example                # one `admin` user in group `admins`; add `users`-group accounts yourself
 ├── litellm/config.yaml
 ├── model-runner/
-│   ├── Dockerfile                       # vLLM image + llama-swap + OTel libs
+│   ├── Dockerfile                       # vLLM image + llama-swap (arm64 release asset) + OTel libs
 │   └── llama-swap.yaml
 ├── comfyui/
 │   ├── Dockerfile                       # NVIDIA PyTorch base, keeps CUDA torch
@@ -682,44 +687,46 @@ ai-stack/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── app.py                           # FastAPI · status · Up/Down · ComfyUI idle unloader
-│   └── templates/{index.html, partials/status.html}
+│   ├── templates/{index.html, partials/status.html}
+│   └── static/htmx.min.js               # vendored htmx 2.0.4 (no third-party script is loaded); see static/README.md
 ├── openclaw/openclaw.snippet.json5      # merge into OpenClaw config inside the sandbox
-├── openshell/                           # gateway notes / state placeholder
 └── observability/
     ├── alloy/config.alloy
     ├── prometheus/prometheus.yml
     ├── loki/config.yaml
     ├── tempo/config.yaml
     ├── grafana/
-    │   ├── provisioning/datasources/datasources.yaml
+    │   ├── provisioning/datasources/datasources.yaml   # Prometheus · Loki · Tempo (trace↔log↔metric links)
     │   ├── provisioning/dashboards/dashboards.yaml
-    │   └── dashboards/gb10-overview.json
+    │   └── dashboards/gb10-overview.json               # the only dashboard shipped
     └── gpu-exporter/{Dockerfile, collect.sh}
 ```
 
 | File | Purpose | Key settings |
 |---|---|---|
-| [`compose.yaml`](ai-stack/compose.yaml) | Every service, network, volume, secret | Caddy `network_mode: host`; LiteLLM + OpenShell gateway + Alloy OTLP also published on `${DOCKER_BRIDGE_IP}` for sandboxes |
-| [`.env.example`](ai-stack/.env.example) | Host + pinned image tags | `PUBLIC_HOST`, `DOCKER_BRIDGE_IP`, `DOCKER_GID`, `MODELS_DIR`, all `*_IMAGE` |
-| [`caddy/Caddyfile`](ai-stack/caddy/Caddyfile) | Single-port path router | `forward_auth` → Authelia; `/llm/v1` key-only + `Remote-*` stripped; 15 min streaming timeouts |
-| [`authelia/configuration.yml`](ai-stack/authelia/configuration.yml) | SSO + 2FA | `default_policy: deny`; `admins` vs `users`; regulation 3 / 2 m / 30 m |
-| [`litellm/config.yaml`](ai-stack/litellm/config.yaml) | LLM + MCP gateway | `agent` alias; 900 s timeouts; `comfy_image` MCP; `prometheus` + `otel` callbacks |
-| [`model-runner/llama-swap.yaml`](ai-stack/model-runner/llama-swap.yaml) | On-demand vLLM | Fixed ports 10001/10002; `gpu-memory-utilization` 0.30 / 0.20; `ttl` 1800 / 900 |
-| [`comfy-mcp/server.py`](ai-stack/comfy-mcp/server.py) | ComfyUI → MCP | Streamable HTTP on `:9100/mcp`; returns PNG + JSON metadata |
-| [`dashboard/app.py`](ai-stack/dashboard/app.py) | Admin UI | `Remote-Groups ∋ admins` for mutations; idle watcher calls ComfyUI `/free` |
-| [`openclaw/openclaw.snippet.json5`](ai-stack/openclaw/openclaw.snippet.json5) | OpenClaw gateway | `basePath: /openclaw`; `trusted-proxy` + `allowLoopback`; `diagnostics-otel` → `host.openshell.internal:4318` |
-| [`observability/…`](ai-stack/observability/) | Metrics, logs, traces | Alloy OTLP → Prometheus / Loki / Tempo; Tempo span metrics; GB10 textfile GPU exporter |
+| [`compose.yaml`](compose.yaml) | Every service, network, volume, secret | Caddy `network_mode: host`; LiteLLM + Alloy OTLP also published on `${DOCKER_BRIDGE_IP}` for sandboxes |
+| [`.env.example`](.env.example) | Host + pinned image tags | `PUBLIC_HOST`, `DOCKER_BRIDGE_IP`, `MODELS_DIR`, all `*_IMAGE` |
+| [`caddy/Caddyfile`](caddy/Caddyfile) | Single-port path router | `forward_auth` → Authelia; `/llm/v1` key-only + `Remote-*` stripped; 15 min streaming timeouts; HSTS/nosniff headers; unmatched paths → `/admin/` |
+| [`authelia/configuration.yml`](authelia/configuration.yml) | SSO + 2FA | `default_policy: deny`; `/llm/v1` bypass; `admins` vs `users`; session 12 h / 1 h idle; regulation 3 / 2 m / 30 m |
+| [`litellm/config.yaml`](litellm/config.yaml) | LLM + MCP gateway | `agent` alias; 900 s timeouts; `num_retries: 1`; `comfy_image` MCP; `prometheus` + `otel` callbacks; `trusted_proxy_ranges` |
+| [`model-runner/llama-swap.yaml`](model-runner/llama-swap.yaml) | On-demand vLLM | Fixed port 10001; `gpu-memory-utilization` 0.30; `ttl` 1800; `logToStdout: both` |
+| [`comfy-mcp/server.py`](comfy-mcp/server.py) | ComfyUI → MCP | Streamable HTTP on `:9100/mcp`; returns a size-budgeted JPEG + JSON metadata (the gateway drops MCP messages over about 1 MiB; the PNG stays in ComfyUI's output folder) |
+| [`dashboard/app.py`](dashboard/app.py) | Admin UI | Any `Remote-User` can read status; `Remote-Groups ∋ admins` required for mutations; idle watcher calls ComfyUI `/free` |
+| [`openclaw/openclaw.snippet.json5`](openclaw/openclaw.snippet.json5) | OpenClaw gateway | `basePath: /openclaw`; `trusted-proxy` (`remote-email`, `allowLoopback`, rate-limited); no `agents` block (NemoClaw writes the model reference; the agent model also handles images); applied inside the sandbox with `openclaw config set`; `diagnostics-otel` → `host.openshell.internal:4318` |
+| [`observability/…`](observability/) | Metrics, logs, traces | Alloy OTLP → Prometheus / Loki / Tempo; Tempo span metrics; GB10 textfile GPU exporter |
 
 ### 13.2 NemoClaw onboarding
 
 | Prompt | Answer |
 |---|---|
-| Gateway | **Reuse existing** → containerised `openshell-gateway` (`openshell gateway add http://172.17.0.1:8080`) |
+| Gateway | NemoClaw creates and manages it (default; do not set `NEMOCLAW_GATEWAY_MANAGEMENT`) |
 | Express install | **No** (custom) |
-| Inference provider | OpenAI-compatible → `http://host.openshell.internal:4000/llm/v1`, key = `openclaw-sandbox` |
+| Inference provider | Other OpenAI-compatible endpoint → `http://host.openshell.internal:4000/llm/v1`, key = `openclaw-sandbox`. Typing `host.openshell.internal` skips host-side probing; if private-address validation rejects it, set `NEMOCLAW_TRUSTED_PRIVATE_HOSTS=host.openshell.internal` |
 | Model | `agent` |
+| Image input / reasoning | Export `NEMOCLAW_INFERENCE_INPUTS=text,image` and `NEMOCLAW_REASONING=true` before onboarding (non-interactive onboarding defaults to text only; changing later needs `nemoclaw onboard --fresh --name my-assistant --recreate-sandbox`) |
 | Sandbox name | `my-assistant` (must match `NEMOCLAW_SANDBOX`) |
-| Policy preset | **Balanced** + allow egress to `host.openshell.internal:4000` (LiteLLM) and `:4318` (OTLP) |
+| Policy preset | **Balanced** + egress to `host.openshell.internal:4318` (OTLP). Inference needs no sandbox rule because requests go through `inference.local` |
+| MCP | After onboarding: `nemoclaw my-assistant mcp add comfy_image --url https://<PUBLIC_HOST>/llm/comfy_image/mcp --env LITELLM_MCP_KEY` (HTTPS only; `host.openshell.internal` is rejected for authenticated MCP) |
 
 ### 13.3 Tailscale Funnel
 
@@ -743,12 +750,11 @@ The tailnet policy must grant the node the `funnel` node attribute.
 │ Model                    │ State     │ Memory  │ Idle / TTL │ Actions       │
 ├──────────────────────────┼───────────┼─────────┼────────────┼───────────────┤
 │ Agent · Qwen3.6 35B      │ ● Ready   │ 36 GB   │ 4m / 30m   │ [Down]        │
-│ Vision · Qwen3-VL 30B    │ ○ Stopped │ —       │ —          │ [Up]          │
 │ Image · FLUX schnell     │ ◐ Idle    │ 1 GB    │ 7m / 10m   │ [Warm] [Free] │
 ├──────────────────────────┴───────────┴─────────┴────────────┴───────────────┤
 │ Services                                                                     │
 │  ● caddy  ● authelia  ● litellm  ● litellm-db  ● model-runner  ● comfyui     │
-│  ● comfy-mcp  ● openshell-gateway  ● sandbox:my-assistant  ● openclaw        │
+│  ● comfy-mcp  ● sandbox:my-assistant  ● openclaw                             │
 │  ● prometheus  ● loki  ● tempo  ● grafana  ● alloy  ● gpu-exporter (8s ago)  │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ Quick links:  /openclaw   /llm/ui   /grafana   /comfy                        │
@@ -760,8 +766,8 @@ The tailnet policy must grant the node the `funnel` node attribute.
 | `GET` | `/` | HTML (HTMX polls `/partials/status` every 5 s) |
 | `GET` | `/api/status` | Aggregated JSON |
 | `POST` | `/api/models/{id}/up` | llama-swap `GET /upstream/{id}/health` (triggers start) |
-| `POST` | `/api/models/{id}/down` | llama-swap `POST /api/models/unload/{id}` (returns `501` if your llama-swap version lacks it) |
-| `POST` | `/api/image/warm` | Queue a 1-step 256 px workflow |
+| `POST` | `/api/models/{id}/down` | llama-swap `POST /api/models/unload/{id}` (`404` for an unknown model; `501` only if llama-swap lacks the endpoint, which v265 does not) |
+| `POST` | `/api/image/warm` | Queue a 1-step 256 px workflow (also resets the idle timer) |
 | `POST` | `/api/image/free` | ComfyUI `POST /free {"unload_models": true, "free_memory": true}` |
 | `GET` | `/healthz` | Liveness |
 
@@ -770,24 +776,23 @@ The tailnet policy must grant the node the `funnel` node attribute.
 | Model list / state | llama-swap `/v1/models` + `/running` |
 | Image model | ComfyUI `/system_stats`, `/queue`, `/history` (idle watcher) |
 | Containers | docker-socket-proxy `GET /containers/json` |
-| OpenShell gateway | `GET /healthz` |
 | Sandbox / OpenClaw | Container whose name contains `NEMOCLAW_SANDBOX` |
 | Memory / GPU | Prometheus (`node_memory_MemAvailable_bytes`, `gb10_gpu_*`) |
 
-**AuthZ:** every mutating route requires `admins ∈ Remote-Groups`.
+**AuthZ:** read routes need a `Remote-User` header (401 otherwise); every mutating route requires `admins ∈ Remote-Groups` (403 otherwise). Model IDs are regex-validated before being passed to llama-swap.
 
 ---
 
 ## 15. MCPs & Skills
 
-| Name | Type | Purpose | Path |
-|---|---|---|---|
-| **comfy_image** | MCP via LiteLLM gateway | `generate_image`, `list_checkpoints` | sandbox → LiteLLM → comfy-mcp |
-| **vision-describe** | Skill | Route images to `qwen3-vl-30b` when agent model is text-only | sandbox → LiteLLM |
-| **web-search** | NemoClaw managed | Brave search | policy allow-list |
-| **github** | MCP via LiteLLM gateway | Issues, PRs, code search | sandbox → LiteLLM → GitHub MCP |
-| **filesystem** | OpenClaw built-in | Sandbox workspace only | Landlock |
-| **stack-ops** *(optional)* | Skill | Read-only status from `/admin/api/status` | dashboard |
+| Name | Type | Purpose | Path | In this repo? |
+|---|---|---|---|---|
+| **comfy_image** | MCP via LiteLLM gateway | `comfy_image-generate_image` (prompt, size, steps, seed, checkpoint → JPEG + JSON), `comfy_image-list_checkpoints` | sandbox → OpenShell MCP proxy → `https://<PUBLIC_HOST>/llm/comfy_image/mcp` (Caddy, key-only) → LiteLLM → comfy-mcp | **Yes** (`comfy-mcp/`, `litellm/config.yaml`) |
+| **image understanding** | Agent model | Qwen3.6-35B-A3B accepts images directly, so there is no separate image model or vision skill | sandbox → LiteLLM | n/a (no `imageModel` set) |
+| **web-search** | NemoClaw managed | Brave search | policy allow-list | No — NemoClaw-side |
+| **github** | MCP via LiteLLM gateway | Issues, PRs, code search | sandbox → LiteLLM → GitHub MCP | No — needs an `mcp_servers` entry |
+| **filesystem** | OpenClaw built-in | Sandbox workspace only | Landlock | n/a |
+| **stack-ops** *(optional)* | Skill | Read-only status from `/admin/api/status` | dashboard | No |
 
 ---
 
@@ -823,13 +828,13 @@ flowchart LR
 
 | Control | Setting |
 |---|---|
-| Public surface | **Only** Funnel `:443`. No `0.0.0.0` publishes. Host firewall default-deny inbound |
+| Public surface | **Only** Funnel `:443`. Compose publishes only to `127.0.0.1` or `${DOCKER_BRIDGE_IP}` (litellm, alloy :4318); Caddy binds `127.0.0.1:9080`. Host firewall default-deny inbound |
 | Human auth | Authelia, **two_factor** on every UI path, `default_policy: deny`, regulation 3 tries / 30 min ban |
 | Machine auth | LiteLLM virtual keys with model allow-lists, RPM caps, budgets |
 | Header spoofing | `forward_auth copy_headers` overwrites; `/llm/v1` strips `Remote-*`; OpenClaw trusts only `127.0.0.1` |
 | Sandbox | NemoClaw Balanced policy; egress only to LiteLLM `:4000`, OTLP `:4318`, Brave, GitHub |
-| Docker socket | **rw:** `openshell-gateway` (required). **ro:** `docker-socket-proxy` (`POST=0`), `alloy`, `cadvisor`. Nothing public has socket access |
-| Secrets | Docker secrets / `secrets/` `chmod 700`; never in `.env`, never in the sandbox |
+| Docker socket | **rw:** none in compose (the NemoClaw-managed gateway uses it on the host). `docker-socket-proxy` mounts it `:ro`, but a read-only mount of a Unix socket does **not** restrict API calls; the restriction is the proxy's allow-list (`CONTAINERS`, `INFO`, `NETWORKS`; `POST=0`). `admin-dashboard` and `alloy` reach Docker only through the proxy and have no socket mount. `cadvisor` mounts `/var/run` (which contains `docker.sock`) and runs **privileged** with `/`, `/sys`, `/var/lib/docker` mounted, so treat it as root-equivalent. Nothing public has socket access |
+| Secrets | Docker secrets / `secrets/` `chmod 700`; never in `.env`, never in the sandbox. LiteLLM reads its master key and DB URL from `secrets/litellm.env` (`env_file`); Prometheus gets the master key as a Docker secret to scrape `/llm/metrics` |
 | Optional hardening | Use Tailscale's Funnel request header to restrict `/admin`, `/grafana`, `/llm` UI to **tailnet-only** while `/openclaw` and `/llm/v1` stay public |
 | Updates | Pin all image tags; Renovate/diun for update notices; never auto-pull `latest` |
 
@@ -843,8 +848,8 @@ flowchart LR
     B --> C["3 · Weights<br/>/srv/models"]
     C --> D["4 · Core<br/>authelia · litellm · db<br/>model-runner · comfyui"]
     D --> E["5 · Observability<br/>alloy · prom · loki<br/>tempo · grafana"]
-    E --> F["6 · OpenShell gateway<br/>container"]
-    F --> G["7 · NemoClaw onboard<br/>reuse gateway · LiteLLM"]
+    E --> F["6 · NemoClaw install"]
+    F --> G["7 · NemoClaw onboard<br/>gateway · LiteLLM · MCP"]
     G --> H["8 · OpenClaw config<br/>basePath · trusted-proxy · otel"]
     H --> I["9 · Caddy + dashboard"]
     I --> J["10 · Funnel :443"]
@@ -856,24 +861,40 @@ flowchart LR
 ```bash
 # 2 · secrets, .env, users.yml (then edit .env and set a password hash in authelia/users.yml)
 cd /srv/ai-stack
-bash scripts/init-secrets.sh
+bash scripts/init-secrets.sh        # prompts for the HF token; creates secrets/, data/, .env, authelia/users.yml
+# then replace every CHANGE_ME in .env (arm64 image tags, LLAMA_SWAP_VERSION, COMFYUI_REF); set PUBLIC_HOST, DOCKER_BRIDGE_IP
 
 # 3 · weights
-huggingface-cli download nvidia/Qwen3.6-35B-A3B-NVFP4 --cache-dir /srv/models/hf
-huggingface-cli download Qwen/Qwen3-VL-30B-A3B-Instruct --cache-dir /srv/models/hf
+# model-runner sets HF_HOME=/models/hf (= ${MODELS_DIR}/hf), so vLLM reads ${MODELS_DIR}/hf/hub.
+# Use HF_HOME (not --cache-dir) so the files land in hub/. The repo is not gated (23.5 GB).
+# Run it from the built image as your own user so the files are not root-owned:
+docker compose build model-runner
+for r in nvidia/Qwen3.6-35B-A3B-NVFP4; do
+  docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e HF_HOME=/models/hf \
+    -v /srv/models/hf:/models/hf --entrypoint hf ai-stack-model-runner download "$r"
+done
+
+# image model: the workflow loads one all-in-one FLUX checkpoint (Apache-2.0, not gated, 17.2 GB)
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e HF_HOME=/tmp/hf -v /srv/models/comfy:/models/comfy \
+  --entrypoint hf ai-stack-model-runner download Comfy-Org/flux1-schnell flux1-schnell-fp8.safetensors \
+  --local-dir /models/comfy/checkpoints
+rm -rf /srv/models/comfy/checkpoints/.cache
 
 # 4–5 · core + observability
 docker compose up -d --build authelia litellm-db litellm model-runner comfyui comfy-mcp
 docker compose up -d --build alloy prometheus loki tempo grafana node-exporter cadvisor gpu-exporter
-bash scripts/create-litellm-keys.sh          # → secrets/litellm_keys.json
+bash scripts/create-litellm-keys.sh          # → secrets/litellm_keys.json (POSTs to http://127.0.0.1:4000/llm/key/generate with the master key)
 
-# 6 · OpenShell gateway
-docker compose up -d openshell-gateway
-openshell gateway add http://172.17.0.1:8080
-openshell status
-
-# 7 · NemoClaw (host CLI) — custom onboarding, reuse gateway
+# 6 · NemoClaw (host CLI). It creates and manages the OpenShell gateway itself; there is no gateway service in compose.
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
+
+# 7 · onboard (details in 13.2). Image input and reasoning are build-time settings, so export them first.
+export NEMOCLAW_INFERENCE_INPUTS=text,image NEMOCLAW_REASONING=true
+nemoclaw onboard
+# then give the sandbox the ComfyUI tools through the public HTTPS MCP URL (key read from the host environment, stored in OpenShell)
+export LITELLM_MCP_KEY=<the openclaw-sandbox key from secrets/litellm_keys.json>
+nemoclaw my-assistant mcp add comfy_image --url https://<PUBLIC_HOST>/llm/comfy_image/mcp --env LITELLM_MCP_KEY
+unset LITELLM_MCP_KEY
 
 # 8 · merge openclaw/openclaw.snippet.json5 into the sandbox's OpenClaw config
 
@@ -907,16 +928,17 @@ sudo tailscale funnel --bg http://127.0.0.1:9080
 
 | Item | Why it matters | How to check |
 |---|---|---|
-| NemoClaw "reuse existing gateway" with a **containerised** OpenShell gateway | Core to the all-container design | `nemoclaw onboard` preflight; fall back to host-installed gateway if unsupported |
-| Can OpenClaw config (`basePath`, `trusted-proxy`, plugins) be changed inside a NemoClaw sandbox and persist? | Required for `/openclaw` + SSO | NemoClaw docs on sandbox config / blueprint overrides |
-| Does the sandbox reach `host.openshell.internal:4000` / `:4318` with your policy? | Inference + telemetry egress | `openshell` policy test from inside sandbox |
+| ~~NemoClaw "reuse existing gateway" with a containerised OpenShell gateway~~ | **Resolved by decision:** NemoClaw's external-gateway mode supports only systemd on `127.0.0.1`, so NemoClaw creates and manages the gateway and compose has no gateway service | — |
+| Does the OpenClaw gateway in the sandbox accept the `trusted-proxy` settings with the NemoClaw port forward? | Required for `/openclaw` + SSO. Docs say `openclaw.json` persists and is editable in the sandbox, but not what source IP the forward presents | Apply the snippet, open `/openclaw/`, check the gateway log for `trusted_proxy_*` errors |
+| Does `nemoclaw onboard` accept `http://host.openshell.internal:4000/llm/v1` (private-address validation; may need `NEMOCLAW_TRUSTED_PRIVATE_HOSTS`), and can the sandbox reach `:4318`? | Inference goes sandbox → `inference.local` → OpenShell → LiteLLM; telemetry is direct sandbox egress | `nemoclaw my-assistant status`, a short agent request, an OTLP policy preset |
 | ComfyUI frontend version that works under `/comfy/` | Sub-path breakage | Test UI, image previews, workflow save |
 | LiteLLM `SERVER_ROOT_PATH` behaviour for UI + `/metrics` | Path routing + scraping | Hit `/llm/ui`, `/llm/metrics` |
 | LiteLLM Prometheus & MCP-gateway licensing / availability in your version | Some features have been enterprise-gated historically | LiteLLM release notes |
-| `Qwen3.6-35B-A3B` multimodal? | Drop the vision VLM (~24 GB) if yes | Model card |
+| ~~`Qwen3.6-35B-A3B` multimodal?~~ | **Resolved:** yes, it accepts images (tested); the separate vision model was removed | — |
 | vLLM tool/reasoning parser names for Qwen3.6 | Wrong parser → empty `tool_calls` | NVIDIA Spark vLLM playbook |
-| Exact arm64 tags: vLLM, PyTorch, LiteLLM, OpenShell gateway, cAdvisor | arm64 + CUDA 13 + sm_121 | NGC / GHCR manifests |
-| llama-swap release asset name + per-model unload endpoint | Dockerfile + dashboard Down | llama-swap README / releases |
+| Exact arm64 tags: vLLM, PyTorch, LiteLLM, cAdvisor | arm64 + CUDA 13 + sm_121 | NGC / GHCR manifests |
+| ~~llama-swap release asset name + per-model unload endpoint~~ | **Resolved** for v265: the `linux_arm64` asset exists and `POST /api/models/unload/{id}` works (tested) | — |
+| `.env` image tags | All `*_IMAGE`, `LLAMA_SWAP_VERSION`, `COMFYUI_REF` ship as `CHANGE_ME` | Fill from NGC / GHCR / Docker Hub |
 | Authelia cookie on a `*.ts.net` host | `ts.net` is a public suffix; cookie must be host-scoped | Login round-trip |
 | Tailscale Funnel request header name for tailnet-only admin hardening | Optional hardening | Tailscale Funnel docs |
 

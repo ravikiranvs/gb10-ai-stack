@@ -13,13 +13,13 @@ from pathlib import Path
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 LLAMA_SWAP_URL = os.environ.get("LLAMA_SWAP_URL", "http://model-runner:8000")
 COMFY_URL = os.environ.get("COMFY_URL", "http://comfyui:8188")
 COMFY_WORKFLOW = Path(os.environ.get("COMFY_WORKFLOW", "/app/workflows/flux-schnell-api.json"))
 COMFY_IDLE_SECONDS = int(os.environ.get("COMFY_IDLE_MINUTES", "10")) * 60
-OPENSHELL_GATEWAY_URL = os.environ.get("OPENSHELL_GATEWAY_URL", "http://openshell-gateway:8080")
 DOCKER_URL = os.environ.get("DOCKER_URL", "http://docker-socket-proxy:2375")
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
 ADMIN_GROUP = os.environ.get("ADMIN_GROUP", "admins")
@@ -47,13 +47,6 @@ async def get_json(client: httpx.AsyncClient, url: str, **kwargs):
         return r.json()
     except (httpx.HTTPError, ValueError):
         return None
-
-
-async def probe(client: httpx.AsyncClient, url: str) -> bool:
-    try:
-        return (await client.get(url, timeout=3)).status_code < 500
-    except httpx.HTTPError:
-        return False
 
 
 async def prom_scalar(client: httpx.AsyncClient, query: str) -> float | None:
@@ -91,14 +84,13 @@ def tiny_workflow() -> dict:
 
 async def collect_status() -> dict:
     async with httpx.AsyncClient() as c:
-        (models, running, comfy_queue, comfy_stats, containers, gateway_ok,
+        (models, running, comfy_queue, comfy_stats, containers,
          mem_avail, mem_total, gpu_util, gpu_temp, gpu_power, gpu_age) = await asyncio.gather(
             get_json(c, f"{LLAMA_SWAP_URL}/v1/models"),
             get_json(c, f"{LLAMA_SWAP_URL}/running"),
             get_json(c, f"{COMFY_URL}/queue"),
             get_json(c, f"{COMFY_URL}/system_stats"),
             get_json(c, f"{DOCKER_URL}/containers/json", params={"all": "1"}),
-            probe(c, f"{OPENSHELL_GATEWAY_URL}/healthz"),
             prom_scalar(c, "node_memory_MemAvailable_bytes"),
             prom_scalar(c, "node_memory_MemTotal_bytes"),
             prom_scalar(c, "gb10_gpu_utilization_percent"),
@@ -143,7 +135,6 @@ async def collect_status() -> dict:
         "image": image,
         "services": services,
         "docker_reachable": containers is not None,
-        "openshell_gateway": gateway_ok,
         "sandbox": sandbox,
         "memory": {
             "available_gib": round(mem_avail / gib, 1) if mem_avail else None,
@@ -164,6 +155,10 @@ async def collect_status() -> dict:
 async def free_comfy(client: httpx.AsyncClient) -> None:
     r = await client.post(f"{COMFY_URL}/free", json={"unload_models": True, "free_memory": True}, timeout=30)
     r.raise_for_status()
+    # Jobs finished before this point are handled: don't let the idle watcher count them as new activity and flip the state back to "hot".
+    history = await get_json(client, f"{COMFY_URL}/history", params={"max_items": "1"})
+    if history:
+        comfy_state.last_history_id = next(iter(history), comfy_state.last_history_id)
     comfy_state.freed = True
 
 
@@ -214,6 +209,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="GB10 AI Stack", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 
@@ -252,7 +248,9 @@ async def model_down(model_id: str, request: Request):
         raise HTTPException(400, "Invalid model id")
     async with httpx.AsyncClient() as c:
         r = await c.post(f"{LLAMA_SWAP_URL}/api/models/unload/{model_id}", timeout=60)
-    if r.status_code in (404, 405):
+    if r.status_code == 404:
+        raise HTTPException(404, f"Unknown model '{model_id}'")
+    if r.status_code == 405:
         raise HTTPException(501, "This llama-swap version has no per-model unload endpoint")
     if r.status_code >= 400:
         raise HTTPException(502, f"llama-swap returned {r.status_code}")

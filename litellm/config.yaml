@@ -8,16 +8,6 @@ model_list:
       stream_timeout: 900
     model_info:
       supports_function_calling: true
-
-  - model_name: qwen3-vl-30b
-    litellm_params:
-      model: openai/qwen3-vl-30b
-      api_base: http://model-runner:8000/v1
-      api_key: unused
-      timeout: 900
-      stream_timeout: 900
-    model_info:
-      supports_function_calling: true
       supports_vision: true
 
   - model_name: agent
@@ -29,6 +19,7 @@ model_list:
       stream_timeout: 900
     model_info:
       supports_function_calling: true
+      supports_vision: true
 
 mcp_servers:
   comfy_image:
@@ -46,4 +37,6 @@ router_settings:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+  # Caddy reaches LiteLLM through the Docker bridge; trust its X-Forwarded-For for client IPs and login throttling
+  trusted_proxy_ranges: ["127.0.0.1/32", "172.16.0.0/12"]
   database_url: os.environ/DATABASE_URL

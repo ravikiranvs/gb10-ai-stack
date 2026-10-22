@@ -1,4 +1,6 @@
-// Merge into the OpenClaw config inside the NemoClaw sandbox.
+// Apply inside the NemoClaw sandbox with `openclaw configure` or `openclaw config set <key> <value>`.
+// openclaw.json is authoritative after first launch and survives restarts; a sandbox rebuild restores the copy saved just before it.
+// The model and inference route are written by `nemoclaw onboard`, so there is no `agents` block here.
 // Replace gb10.example-tailnet.ts.net with your PUBLIC_HOST.
 {
   gateway: {
@@ -16,13 +18,6 @@
       rateLimit: { maxAttempts: 10, windowMs: 60000, lockoutMs: 300000 },
     },
     tailscale: { mode: "off" },
-  },
-
-  agents: {
-    defaults: {
-      model: { primary: "agent" },
-      imageModel: { primary: "qwen3-vl-30b" },
-    },
   },
 
   plugins: {

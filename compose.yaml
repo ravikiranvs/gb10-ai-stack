@@ -26,6 +26,8 @@ secrets:
     file: ./secrets/litellm_db_password
   hf_token:
     file: ./secrets/hf_token
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
 
 volumes:
   authelia_data: {}
@@ -36,19 +38,20 @@ volumes:
   grafana_data: {}
   alloy_data: {}
   textfile: {}
+  vllm_cache: {}
 
 services:
 
   # ─────────────────────────── Edge ───────────────────────────
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.7-alpine
     network_mode: host                     # reaches the OpenClaw sandbox forward on host 127.0.0.1:18789
     restart: unless-stopped
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
 
   authelia:
-    image: authelia/authelia:4
+    image: authelia/authelia:4.39.28
     restart: unless-stopped
     networks: [ai]
     ports: ["127.0.0.1:9091:9091"]
@@ -62,11 +65,12 @@ services:
     secrets: [authelia_jwt, authelia_session, authelia_storage_key]
     volumes:
       - ./authelia:/config:ro
+      - ./authelia/users.yml:/config/users.yml   # read-write so password resets/changes in the UI can be saved
       - authelia_data:/data
 
   # ─────────────────────────── LLM gateway ───────────────────────────
   litellm-db:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine
     restart: unless-stopped
     networks: [ai]
     environment:
@@ -118,8 +122,14 @@ services:
       HF_TOKEN_PATH: /run/secrets/hf_token
       HF_HOME: /models/hf
       OTEL_EXPORTER_OTLP_TRACES_INSECURE: "true"
+      # Keep the compile and JIT caches across container re-creation (cuts a cold start from about 330 s to about 200 s):
+      XDG_CACHE_HOME: /cache                # vLLM torch.compile cache + FlashInfer autotune (/cache/vllm)
+      TRITON_CACHE_DIR: /cache/triton
+      CUDA_CACHE_PATH: /cache/cuda          # the driver JIT-compiles PTX for sm_121 on first use; default cache is lost with the container
+      CUDA_CACHE_MAXSIZE: "4294967296"      # 4 GiB (the default 256 MiB would evict)
     volumes:
       - ${MODELS_DIR}/hf:/models/hf
+      - vllm_cache:/cache
       - ./model-runner/llama-swap.yaml:/config/config.yaml:ro
 
   comfyui:
@@ -158,29 +168,15 @@ services:
       comfyui:
         condition: service_healthy
 
-  # ─────────────────────────── Agent runtime ───────────────────────────
-  # Follow upstream OpenShell deploy/docker/docker-compose.yml for any additional env/volumes.
-  openshell-gateway:
-    image: ${OPENSHELL_GATEWAY_IMAGE}
-    restart: unless-stopped
-    networks: [ai]
-    ports:
-      - "${DOCKER_BRIDGE_IP}:8080:8080"    # must stay 8080:8080 (sandbox callback port)
-    group_add: ["${DOCKER_GID}"]
-    environment:
-      OPENSHELL_GRPC_ENDPOINT: http://host.openshell.internal:8080
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/openshell:/var/lib/openshell   # identical path on host and in container
-
   # ─────────────────────────── Control ───────────────────────────
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy
+    image: tecnativa/docker-socket-proxy:v0.5.0
     restart: unless-stopped
     networks: [ai]
     environment:
       CONTAINERS: 1
       INFO: 1
+      NETWORKS: 1                          # Alloy's Docker discovery calls GET /networks
       POST: 0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -195,7 +191,6 @@ services:
       COMFY_URL: http://comfyui:8188
       COMFY_WORKFLOW: /app/workflows/flux-schnell-api.json
       COMFY_IDLE_MINUTES: ${COMFY_IDLE_MINUTES}
-      OPENSHELL_GATEWAY_URL: http://openshell-gateway:8080
       DOCKER_URL: http://docker-socket-proxy:2375
       PROMETHEUS_URL: http://prometheus:9090
       ADMIN_GROUP: admins
@@ -217,8 +212,8 @@ services:
       - --server.http.listen-addr=0.0.0.0:12345
     volumes:
       - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - alloy_data:/var/lib/alloy
+    depends_on: [docker-socket-proxy]      # container logs are read through the read-only proxy, not the socket
 
   prometheus:
     image: ${PROMETHEUS_IMAGE}
@@ -266,8 +261,10 @@ services:
       GF_AUTH_PROXY_HEADERS: "Email:Remote-Email Name:Remote-Name Groups:Remote-Groups"
       GF_AUTH_PROXY_WHITELIST: "172.16.0.0/12, 127.0.0.1"
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password   # replaces the built-in admin/admin
       GF_USERS_AUTO_ASSIGN_ORG_ROLE: Admin
       GF_ANALYTICS_REPORTING_ENABLED: "false"
+    secrets: [grafana_admin_password]
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -281,6 +278,7 @@ services:
     command:
       - --path.rootfs=/host
       - --collector.textfile.directory=/textfile
+      - --no-collector.cpufreq             # hangs intermittently on the GB10 and stalls the whole scrape (7 of 30 scrapes succeeded with it, 30 of 30 without)
     volumes:
       - /:/host:ro,rslave
       - textfile:/textfile:ro
@@ -298,9 +296,9 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
 
   gpu-exporter:
+    <<: *gpu
     build: ./observability/gpu-exporter
     restart: unless-stopped
-    runtime: nvidia
     network_mode: none
     environment:
       NVIDIA_VISIBLE_DEVICES: all

@@ -15,6 +15,9 @@ COMFY_URL = os.environ.get("COMFY_URL", "http://comfyui:8188")
 WORKFLOW_PATH = Path(os.environ.get("COMFY_WORKFLOW", "/app/workflows/flux-schnell-api.json"))
 DEFAULT_STEPS = int(os.environ.get("COMFY_DEFAULT_STEPS", "4"))
 TIMEOUT_SECONDS = int(os.environ.get("COMFY_TIMEOUT_SECONDS", "600"))
+# The LiteLLM MCP gateway drops any MCP message over ~1 MiB, and base64 adds a third, so keep the image under ~780 KB.
+MAX_IMAGE_BYTES = int(os.environ.get("COMFY_MAX_IMAGE_BYTES", "700000"))
+JPEG_QUALITIES = (90, 80, 70, 60, 50, 40)
 HOST, PORT = os.environ.get("MCP_BIND", "0.0.0.0:9100").rsplit(":", 1)
 
 # Node ids in the API-format workflow
@@ -39,7 +42,7 @@ def build_workflow(prompt: str, negative: str, width: int, height: int, steps: i
     return wf
 
 
-async def run_workflow(wf: dict) -> bytes:
+async def run_workflow(wf: dict) -> tuple[bytes, int]:
     async with httpx.AsyncClient(base_url=COMFY_URL, timeout=30) as client:
         r = await client.post("/prompt", json={"prompt": wf, "client_id": str(uuid.uuid4())})
         if r.status_code >= 400:
@@ -57,13 +60,18 @@ async def run_workflow(wf: dict) -> bytes:
                 images = entry.get("outputs", {}).get(NODE_SAVE, {}).get("images", [])
                 if images:
                     img = images[0]
-                    view = await client.get("/view", params={
-                        "filename": img["filename"],
-                        "subfolder": img.get("subfolder", ""),
-                        "type": img.get("type", "output"),
-                    })
-                    view.raise_for_status()
-                    return view.content
+                    # Ask ComfyUI for a JPEG instead of the saved PNG (same pixels, about 6x smaller); the PNG stays in its output folder.
+                    for quality in JPEG_QUALITIES:
+                        view = await client.get("/view", params={
+                            "filename": img["filename"],
+                            "subfolder": img.get("subfolder", ""),
+                            "type": img.get("type", "output"),
+                            "preview": f"jpeg;{quality}",
+                        })
+                        view.raise_for_status()
+                        if len(view.content) <= MAX_IMAGE_BYTES:
+                            break
+                    return view.content, quality
                 if status.get("completed"):
                     raise RuntimeError("Workflow completed without an image output")
             await asyncio.sleep(1)
@@ -82,21 +90,25 @@ async def generate_image(prompt: str, negative: str = "", width: int = 1024, hei
         width: Output width in pixels (256-2048, rounded to a multiple of 16).
         height: Output height in pixels (256-2048, rounded to a multiple of 16).
         steps: Sampler steps (default from COMFY_DEFAULT_STEPS).
-        seed: Random seed for reproducibility.
+        seed: Random seed for reproducibility (omit or use a negative number for a random one).
         checkpoint: Optional checkpoint filename from list_checkpoints.
     """
-    seed = seed if seed is not None else random.randint(0, 2**32 - 1)
+    if seed is None or seed < 0:  # LLMs often send -1 for "random"; ComfyUI rejects negative seeds
+        seed = random.randint(0, 2**32 - 1)
     wf = build_workflow(prompt, negative, width, height, steps or DEFAULT_STEPS, seed, checkpoint)
     started = time.monotonic()
-    png = await run_workflow(wf)
+    jpeg, quality = await run_workflow(wf)
     meta = {
         "seed": seed,
         "width": wf[NODE_LATENT]["inputs"]["width"],
         "height": wf[NODE_LATENT]["inputs"]["height"],
         "steps": wf[NODE_SAMPLER]["inputs"]["steps"],
+        "format": "jpeg",
+        "jpeg_quality": quality,
+        "bytes": len(jpeg),
         "elapsed_s": round(time.monotonic() - started, 2),
     }
-    return [Image(data=png, format="png"), json.dumps(meta)]
+    return [Image(data=jpeg, format="jpeg"), json.dumps(meta)]
 
 
 @mcp.tool()

@@ -8,6 +8,7 @@ RUN pip install -r requirements.txt
 
 COPY app.py .
 COPY templates ./templates
+COPY static ./static
 RUN useradd -r -u 10001 app
 USER app
 

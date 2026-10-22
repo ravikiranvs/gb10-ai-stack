@@ -47,8 +47,7 @@ Copy from `.env.example`. Docker Compose reads it. It holds no secrets.
 | Variable | Description | Example value | Required |
 |---|---|---|---|
 | `PUBLIC_HOST` | Tailscale Funnel hostname. Used for Authelia cookie domain, ACL rules, redirect URLs and Grafana root URL | `gb10.tail1234.ts.net` | Yes |
-| `DOCKER_BRIDGE_IP` | `docker0` address. LiteLLM `:4000`, OpenShell gateway `:8080` and Alloy OTLP `:4318` bind here so sandboxes can reach them as `host.openshell.internal` | `172.17.0.1` | Check (`ip -4 addr show docker0`) |
-| `DOCKER_GID` | Group id of `/var/run/docker.sock`; added to the OpenShell gateway container | `988` | Check (`getent group docker \| cut -d: -f3`) |
+| `DOCKER_BRIDGE_IP` | `docker0` address. LiteLLM `:4000` and Alloy OTLP `:4318` bind here so sandboxes can reach them as `host.openshell.internal` | `172.17.0.1` | Check (`ip -4 addr show docker0`) |
 | `MODELS_DIR` | Host folder for model weights. `hf/` is mounted into model-runner, `comfy/` into ComfyUI | `/srv/models` | Check |
 | `TZ` | Timezone for Authelia | `Europe/London` | Optional |
 
@@ -58,17 +57,16 @@ Copy from `.env.example`. Docker Compose reads it. It holds no secrets.
 |---|---|---|---|
 | `VLLM_IMAGE` | Base image for model-runner (vLLM + llama-swap) | `nvcr.io/nvidia/vllm:26.09-py3` | Yes |
 | `PYTORCH_IMAGE` | Base image for ComfyUI (keeps NVIDIA's CUDA torch) | `nvcr.io/nvidia/pytorch:26.09-py3` | Yes |
-| `LLAMA_SWAP_VERSION` | llama-swap release number baked into model-runner | `170` | Yes |
-| `COMFYUI_REF` | ComfyUI git tag or commit to build | `v0.3.60` | Yes |
-| `LITELLM_IMAGE` | LiteLLM proxy image | `ghcr.io/berriai/litellm:v1.106.1` | Yes |
-| `OPENSHELL_GATEWAY_IMAGE` | OpenShell gateway image | `ghcr.io/nvidia/openshell/gateway:0.9.0` | Yes |
-| `ALLOY_IMAGE` | Grafana Alloy collector | `grafana/alloy:v1.10.0` | Yes |
-| `PROMETHEUS_IMAGE` | Prometheus | `prom/prometheus:v3.6.0` | Yes |
-| `LOKI_IMAGE` | Loki (3.x, to match the provided config) | `grafana/loki:3.5.0` | Yes |
-| `TEMPO_IMAGE` | Tempo | `grafana/tempo:2.8.0` | Yes |
-| `GRAFANA_IMAGE` | Grafana OSS | `grafana/grafana-oss:12.2.0` | Yes |
-| `NODE_EXPORTER_IMAGE` | Prometheus node exporter | `prom/node-exporter:v1.9.0` | Yes |
-| `CADVISOR_IMAGE` | cAdvisor (a release that supports Docker 25+) | `gcr.io/cadvisor/cadvisor:v0.52.1` | Yes |
+| `LLAMA_SWAP_VERSION` | llama-swap release number baked into model-runner | `265` | Yes |
+| `COMFYUI_REF` | ComfyUI git tag or commit to build | `v0.42.1` | Yes |
+| `LITELLM_IMAGE` | LiteLLM proxy image | `ghcr.io/berriai/litellm:v1.106.2` | Yes |
+| `ALLOY_IMAGE` | Grafana Alloy collector | `grafana/alloy:v1.21.0` | Yes |
+| `PROMETHEUS_IMAGE` | Prometheus (3.5.x is the LTS line) | `prom/prometheus:v3.5.5` | Yes |
+| `LOKI_IMAGE` | Loki (3.x, to match the provided config) | `grafana/loki:3.7.9` | Yes |
+| `TEMPO_IMAGE` | Tempo (2.x to match the provided single-binary config; 3.x changed the architecture) | `grafana/tempo:2.10.9` | Yes |
+| `GRAFANA_IMAGE` | Grafana (`grafana/grafana` is the OSS edition; `grafana-oss` on Docker Hub stops at 13.0.x) | `grafana/grafana:13.2.4` | Yes |
+| `NODE_EXPORTER_IMAGE` | Prometheus node exporter | `prom/node-exporter:v1.12.1` | Yes |
+| `CADVISOR_IMAGE` | cAdvisor (a release that supports Docker 25+) | `ghcr.io/google/cadvisor:v0.60.6` | Yes |
 
 ### Behaviour
 
@@ -91,6 +89,7 @@ One value per file, no trailing newline. Git-ignored, `chmod 700`. `scripts/init
 | `authelia_storage_key` | Authelia SQLite storage encryption key | `c07a…` (64 hex chars) | Generated |
 | `litellm_master_key` | LiteLLM admin key; also used by Prometheus to scrape `/llm/metrics` | `sk-3f9a…` (`sk-` + 48 hex) | Generated |
 | `litellm_db_password` | Postgres password for the `litellm` user | `a81d…` (48 hex chars) | Generated |
+| `grafana_admin_password` | Password for Grafana's built-in `admin` account (replaces the default `admin`/`admin`); read via `GF_SECURITY_ADMIN_PASSWORD__FILE`. Day-to-day access is through Authelia, so you rarely need it. Mode 644 so Grafana (uid 472) can read it | `a81d…` (48 hex chars) | Generated |
 | `litellm.env` | Env file for LiteLLM: `LITELLM_MASTER_KEY=…` and `DATABASE_URL=postgresql://litellm:<pw>@litellm-db:5432/litellm` | see description | Generated |
 | `hf_token` | Hugging Face token for model downloads | `hf_AbCdEf…` | **Yes** (you supply it) |
 | `litellm_keys.json` | Virtual keys created by `create-litellm-keys.sh` (`openclaw-sandbox`, `laptop`, `scripts`) | JSON array | Generated after LiteLLM is up |
@@ -106,7 +105,7 @@ Copied from `users.yml.example`; git-ignored. Repeat the block for each user.
 | `users.<username>` | Login name (YAML key) | `kiran` | Yes |
 | `displayname` | Name shown in the UI and passed as `Remote-Name` | `Kiran` | Yes |
 | `email` | Passed as `Remote-Email`. OpenClaw `trusted-proxy` uses it as the user identity | `kiran@example.com` | Yes |
-| `password` | Argon2id hash (`docker run --rm -it authelia/authelia:4 authelia crypto hash generate argon2`) | `$argon2id$v=19$m=65536,t=3,p=4$…` | Yes |
+| `password` | Argon2id hash (`docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2`) | `$argon2id$v=19$m=65536,t=3,p=4$…` | Yes |
 | `groups` | `admins` = full access; `users` = `/openclaw` only | `[admins]` | Yes |
 
 ---
@@ -135,10 +134,10 @@ Mostly filled in from `.env` (see above). These values are typed directly into t
 | `GF_AUTH_PROXY_WHITELIST` (grafana) | Source IPs allowed to send `Remote-User`; must cover the Docker network gateways | `172.16.0.0/12, 127.0.0.1` | Check (Docker address pools) |
 | `GF_USERS_AUTO_ASSIGN_ORG_ROLE` (grafana) | Role for auto-created Grafana users | `Admin` | Optional |
 | `--storage.tsdb.retention.time` (prometheus) | Metric retention | `30d` | Optional |
-| `OPENSHELL_GRPC_ENDPOINT` (openshell-gateway) | Callback URL sandboxes use to reach the gateway | `http://host.openshell.internal:8080` | Check against OpenShell's upstream compose |
-| `/var/lib/openshell` volume (openshell-gateway) | Gateway state + supervisor binary; must be the **same path** on host and container | `/var/lib/openshell` | Check |
+| `XDG_CACHE_HOME` / `TRITON_CACHE_DIR` (model-runner) | Where vLLM keeps its `torch.compile` cache, FlashInfer autotune results and Triton kernels. On the `vllm_cache` volume so they survive container re-creation | `/cache`, `/cache/triton` | Optional |
+| `CUDA_CACHE_PATH` / `CUDA_CACHE_MAXSIZE` (model-runner) | The driver's JIT cache. The GB10 (`sm_121`) JIT-compiles PTX on first use, which costs about 46 s of CUDA-graph capture per cold start without this cache. 4 GiB because the default 256 MiB evicts. To reset all caches: `docker volume rm ai-stack_vllm_cache` | `/cache/cuda`, `4294967296` | Optional |
 | `INTERVAL_SECONDS` (gpu-exporter) | GPU sampling interval | `10` | Optional |
-| Image tags not in `.env` | `caddy:2-alpine`, `authelia/authelia:4`, `postgres:17-alpine`, `tecnativa/docker-socket-proxy` (no tag) | `caddy:2.10-alpine` | Optional (pin recommended) |
+| Image tags not in `.env` | Pinned directly in `compose.yaml`: `caddy:2.11.7-alpine`, `authelia/authelia:4.39.28`, `postgres:17.11-alpine` (`postgres` major version must not change on an existing volume), `tecnativa/docker-socket-proxy:v0.5.0` | `caddy:2.11.7-alpine` | Optional (bump when updating) |
 
 ---
 
@@ -165,11 +164,12 @@ No variables. These ports are typed in and must match the published ports in `co
 |---|---|---|---|
 | `LITELLM_MASTER_KEY` (env) | Admin key, from `secrets/litellm.env` | `sk-3f9a…` | Generated |
 | `DATABASE_URL` (env) | Postgres DSN, from `secrets/litellm.env` | `postgresql://litellm:…@litellm-db:5432/litellm` | Generated |
-| `model_list[].model_name` | Names clients request | `agent`, `qwen3.6-35b`, `qwen3-vl-30b` | Optional |
+| `model_list[].model_name` | Names clients request | `agent`, `qwen3.6-35b` | Optional |
 | `litellm_params.model` | `openai/<served-model-name>` from llama-swap | `openai/qwen3.6-35b` | Must match llama-swap |
 | `litellm_params.api_base` | llama-swap endpoint | `http://model-runner:8000/v1` | Optional |
 | `timeout` / `stream_timeout` / `request_timeout` | Must exceed vLLM cold start | `900` | Optional |
-| `mcp_servers.comfy_image.url` | comfy-mcp endpoint | `http://comfy-mcp:9100/mcp` | Optional |
+| `mcp_servers.comfy_image.url` | comfy-mcp endpoint. Clients reach it through LiteLLM at `/llm/comfy_image/mcp`; tools are named `comfy_image-<tool>` | `http://comfy-mcp:9100/mcp` | Optional |
+| `general_settings.trusted_proxy_ranges` | Proxy source ranges LiteLLM trusts for forwarded client IPs and login throttling (Caddy arrives from the Docker bridge) | `["127.0.0.1/32", "172.16.0.0/12"]` | Check (Docker address pools) |
 | `router_settings.num_retries` | Retries per request | `1` | Optional |
 
 ---
@@ -179,14 +179,14 @@ No variables. These ports are typed in and must match the published ports in `co
 | Variable | Description | Example value | Required |
 |---|---|---|---|
 | `VLLM_IMAGE` (build arg) | From `.env` | `nvcr.io/nvidia/vllm:26.09-py3` | via `.env` |
-| `LLAMA_SWAP_VERSION` (build arg) | From `.env`; used in the release download URL | `170` | via `.env` |
-| Release asset name | `llama-swap_<ver>_linux_arm64.tar.gz`; confirm on the releases page | `llama-swap_170_linux_arm64.tar.gz` | Check |
+| `LLAMA_SWAP_VERSION` (build arg) | From `.env`; used in the release download URL | `265` | via `.env` |
+| Release asset name | `llama-swap_<ver>_linux_arm64.tar.gz`; confirm on the releases page | `llama-swap_265_linux_arm64.tar.gz` | Check |
 
 ---
 
 ## `model-runner/llama-swap.yaml`
 
-Set per model (`qwen3.6-35b`, `qwen3-vl-30b`).
+Set for the one model (`qwen3.6-35b`).
 
 | Variable | Description | Example value | Required |
 |---|---|---|---|
@@ -194,15 +194,15 @@ Set per model (`qwen3.6-35b`, `qwen3-vl-30b`).
 | Hugging Face model ID | First argument to `vllm serve` | `nvidia/Qwen3.6-35B-A3B-NVFP4` | Check |
 | `--served-model-name` | Name exposed on `/v1/models` | `qwen3.6-35b` | Must match LiteLLM |
 | `--port` + `proxy` | Fixed port per model (scraped by Prometheus) | `10001` / `http://127.0.0.1:10001` | Must match prometheus.yml |
-| `--gpu-memory-utilization` | Share of unified memory vLLM reserves | `0.30` (agent), `0.20` (vision) | Check |
+| `--gpu-memory-utilization` | Share of unified memory vLLM reserves | `0.30` | Check |
 | `--max-model-len` | Context length | `65536` | Optional |
 | `--max-num-seqs` | Concurrent sequences | `4` | Optional |
 | `--tool-call-parser` | vLLM tool-call parser for the model | `qwen3_coder` | **Check** (wrong value → empty `tool_calls`) |
 | `--reasoning-parser` | vLLM reasoning parser | `qwen3` | Check |
-| `--limit-mm-per-prompt` | Max images per request (vision) | `'{"image": 4}'` | Optional |
+| `--limit-mm-per-prompt` | Not set. The agent model accepts images; add this to cap images per request | — | Optional |
 | `--otlp-traces-endpoint` | Where vLLM sends traces | `http://alloy:4317` | Optional |
-| `ttl` | Idle seconds before the model is stopped | `1800` (agent), `900` (vision) | Optional |
-| `groups.llm.swap` / `exclusive` | Allow both models loaded at once | `false` / `false` | Optional |
+| `ttl` | Idle seconds before the model is stopped | `1800` | Optional |
+| `logToStdout` | Send vLLM output to the container log so Alloy ships it to Loki (applied at container start, not on hot reload) | `both` | Optional |
 
 ---
 
@@ -211,7 +211,7 @@ Set per model (`qwen3.6-35b`, `qwen3-vl-30b`).
 | Variable | Description | Example value | Required |
 |---|---|---|---|
 | `BASE_IMAGE` (build arg) | From `PYTORCH_IMAGE` in `.env` | `nvcr.io/nvidia/pytorch:26.09-py3` | via `.env` |
-| `COMFYUI_REF` (build arg) | From `.env` | `v0.3.60` | via `.env` |
+| `COMFYUI_REF` (build arg) | From `.env` | `v0.42.1` | via `.env` |
 
 ---
 
@@ -219,7 +219,7 @@ Set per model (`qwen3.6-35b`, `qwen3-vl-30b`).
 
 | Variable | Description | Example value | Required |
 |---|---|---|---|
-| `1.inputs.ckpt_name` | Checkpoint filename in `${MODELS_DIR}/comfy/checkpoints/` | `flux1-schnell-fp8.safetensors` | **Check** |
+| `1.inputs.ckpt_name` | Checkpoint filename in `${MODELS_DIR}/comfy/checkpoints/`. One all-in-one file (model, text encoders, VAE); download it from `Comfy-Org/flux1-schnell` (Apache-2.0, not gated, 17.2 GB) | `flux1-schnell-fp8.safetensors` | **Check** |
 | `5.inputs.sampler_name` | Sampler | `euler` | Optional |
 | `5.inputs.scheduler` | Scheduler | `simple` | Optional |
 | `5.inputs.cfg` | CFG scale (FLUX schnell uses 1.0) | `1.0` | Optional |
@@ -237,6 +237,7 @@ Environment variables (set in `compose.yaml`).
 | `COMFY_WORKFLOW` | API-format workflow path | `/app/workflows/flux-schnell-api.json` | Optional |
 | `COMFY_DEFAULT_STEPS` | Default steps (from `.env`) | `4` | via `.env` |
 | `COMFY_TIMEOUT_SECONDS` | Max wait per image (not set in compose) | `600` | Optional |
+| `COMFY_MAX_IMAGE_BYTES` | Size budget for the JPEG returned to the caller (not set in compose). The LiteLLM MCP gateway drops messages over about 1 MiB and base64 adds a third, so keep this under about 780000. The tool lowers the JPEG quality (90 down to 40) until the image fits; the full-quality PNG stays in ComfyUI's output folder | `700000` | Optional |
 | `MCP_BIND` | Listen address for streamable HTTP | `0.0.0.0:9100` | Optional |
 
 ---
@@ -251,7 +252,6 @@ Environment variables (set in `compose.yaml`).
 | `COMFY_URL` | ComfyUI API | `http://comfyui:8188` | Optional |
 | `COMFY_WORKFLOW` | Workflow used for "Warm" | `/app/workflows/flux-schnell-api.json` | Optional |
 | `COMFY_IDLE_MINUTES` | Idle unload threshold (from `.env`) | `10` | via `.env` |
-| `OPENSHELL_GATEWAY_URL` | Gateway health check (`/healthz`) | `http://openshell-gateway:8080` | Optional |
 | `DOCKER_URL` | Read-only Docker API via socket proxy | `http://docker-socket-proxy:2375` | Optional |
 | `PROMETHEUS_URL` | Memory / GPU queries | `http://prometheus:9090` | Optional |
 | `ADMIN_GROUP` | Group required for Up/Down/Warm/Free | `admins` | Optional |
@@ -261,7 +261,7 @@ Environment variables (set in `compose.yaml`).
 
 ## `openclaw/openclaw.snippet.json5`
 
-Merged by hand into OpenClaw's config inside the NemoClaw sandbox. **Not templated**, so edit it directly.
+Applied inside the NemoClaw sandbox with `openclaw configure` or `openclaw config set`. **Not templated**, so edit it directly.
 
 | Variable | Description | Example value | Required |
 |---|---|---|---|
@@ -270,8 +270,7 @@ Merged by hand into OpenClaw's config inside the NemoClaw sandbox. **Not templat
 | `gateway.port` | Gateway port (NemoClaw forwards it to host) | `18789` | Check |
 | `gateway.trustedProxies` | Proxy source IPs trusted for identity headers | `["127.0.0.1"]` | Optional |
 | `gateway.auth.trustedProxy.userHeader` | Header holding the user identity | `remote-email` | Optional |
-| `agents.defaults.model.primary` | Default chat model (LiteLLM name) | `agent` | Optional |
-| `agents.defaults.imageModel.primary` | Vision model; remove it if the agent model is multimodal | `qwen3-vl-30b` | Optional |
+| `agents.defaults.*` | Not set here: `nemoclaw onboard` writes the model reference (enter `agent` as the model ID). Image input needs `NEMOCLAW_INFERENCE_INPUTS=text,image` at onboarding | — | — |
 | `diagnostics.otel.endpoint` | OTLP/HTTP collector reachable from the sandbox | `http://host.openshell.internal:4318` | Optional |
 | `diagnostics.otel.sampleRate` | Trace sampling ratio | `1.0` | Optional |
 
@@ -290,7 +289,7 @@ Merged by hand into OpenClaw's config inside the NemoClaw sandbox. **Not templat
 | Variable | Description | Example value | Required |
 |---|---|---|---|
 | `LITELLM_API` (env) | LiteLLM base URL including root path | `http://127.0.0.1:4000/llm` | Optional |
-| `openclaw-sandbox` → `models`, `rpm_limit` | Key used by NemoClaw / the sandbox | `["agent","qwen3.6-35b","qwen3-vl-30b"]`, `60` | Optional |
+| `openclaw-sandbox` → `models`, `rpm_limit`, `object_permission.mcp_servers` | Key used by NemoClaw / the sandbox. MCP access is granted to every server in `litellm/config.yaml` (keys have none by default) | `["agent","qwen3.6-35b"]`, `60`, all servers | Optional |
 | `laptop` → `rpm_limit`, `max_budget`, `budget_duration` | Personal API key limits | `30`, `50`, `30d` | Optional |
 | `scripts` → `models`, `rpm_limit` | Automation key | `["agent"]`, `10` | Optional |
 
@@ -353,12 +352,14 @@ Merged by hand into OpenClaw's config inside the NemoClaw sandbox. **Not templat
 | Value | Files |
 |---|---|
 | `PUBLIC_HOST` | `.env`, `openclaw/openclaw.snippet.json5` (`publicOrigin`) |
-| `NEMOCLAW_SANDBOX` | `.env`, the name entered in `nemoclaw onboard` |
-| `qwen3.6-35b`, `qwen3-vl-30b` | `model-runner/llama-swap.yaml`, `litellm/config.yaml`, `scripts/create-litellm-keys.sh`, `openclaw/openclaw.snippet.json5` |
+| `NEMOCLAW_SANDBOX` | `.env`, the name entered in `nemoclaw onboard`, `compose.yaml` (passed to the dashboard, which matches it against container names) |
+| `qwen3.6-35b` | `model-runner/llama-swap.yaml`, `litellm/config.yaml`, `scripts/create-litellm-keys.sh`, `observability/prometheus/prometheus.yml` (`model` label) |
 | `agent` | `litellm/config.yaml`, `scripts/create-litellm-keys.sh`, `openclaw/openclaw.snippet.json5`, NemoClaw onboarding |
-| Ports `10001` / `10002` | `model-runner/llama-swap.yaml`, `observability/prometheus/prometheus.yml` |
+| Port `10001` | `model-runner/llama-swap.yaml`, `observability/prometheus/prometheus.yml` |
 | `/llm` root path | `compose.yaml` (`SERVER_ROOT_PATH`), `caddy/Caddyfile`, `prometheus.yml`, `create-litellm-keys.sh`, NemoClaw provider URL |
 | `admins` group | `authelia/users.yml`, `authelia/configuration.yml`, `compose.yaml` (`ADMIN_GROUP`) |
-| Workflow node IDs `1`–`7` | `flux-schnell-api.json`, `comfy-mcp/server.py`, `dashboard/app.py` |
-| Host ports 9091 · 4000 · 3000 · 8188 · 9000 · 18789 | `compose.yaml`, `caddy/Caddyfile` |
+| Workflow node IDs `1`–`7` (`comfy-mcp` uses 1, 2, 3, 4, 5, 7; the dashboard warm-up uses 2, 4, 5) | `flux-schnell-api.json`, `comfy-mcp/server.py`, `dashboard/app.py` |
+| Host ports 9091 · 4000 · 3000 · 8188 · 9000 | `compose.yaml`, `caddy/Caddyfile` |
+| Caddy listener `127.0.0.1:9080` | `caddy/Caddyfile`, the `tailscale funnel` command |
+| OpenClaw port `18789` | `caddy/Caddyfile` only; the sandbox forward is created by NemoClaw, not compose |
 | Checkpoint filename | `flux-schnell-api.json`, file in `${MODELS_DIR}/comfy/checkpoints/` |

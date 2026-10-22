@@ -1,5 +1,5 @@
 # Copy to users.yml (git-ignored). Hash with:
-#   docker run --rm -it authelia/authelia:4 authelia crypto hash generate argon2
+#   docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2
 users:
   admin:
     displayname: Admin

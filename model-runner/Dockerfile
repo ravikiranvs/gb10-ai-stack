@@ -8,12 +8,6 @@ RUN tar -xzf /tmp/llama-swap.tgz -C /usr/local/bin llama-swap \
  && rm /tmp/llama-swap.tgz \
  && chmod +x /usr/local/bin/llama-swap
 
-# OpenTelemetry packages required by vLLM --otlp-traces-endpoint
-RUN pip install --no-cache-dir \
-      "opentelemetry-sdk>=1.26,<2" \
-      "opentelemetry-api>=1.26,<2" \
-      "opentelemetry-exporter-otlp>=1.26,<2" \
-      "opentelemetry-semantic-conventions-ai>=0.4,<1"
-
-EXPOSE 8000 10001 10002
+# vLLM --otlp-traces-endpoint needs the OpenTelemetry packages; NVIDIA's vLLM image already ships them (no pip install here)
+EXPOSE 8000 10001
 ENTRYPOINT ["llama-swap", "--config", "/config/config.yaml", "--listen", "0.0.0.0:8000", "--watch-config"]

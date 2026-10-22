@@ -9,6 +9,7 @@
 (authelia) {
 	forward_auth 127.0.0.1:9091 {
 		uri /auth/api/authz/forward-auth
+		header_up X-Forwarded-Proto https    # all public traffic arrives over HTTPS (Funnel); Authelia builds its post-login return URL from this
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
 }
@@ -38,6 +39,18 @@ http://:9080 {
 
 	# Model API: machine clients authenticate with LiteLLM virtual keys
 	handle /llm/v1/* {
+		request_header -Remote-User
+		request_header -Remote-Groups
+		request_header -Remote-Email
+		request_header -Remote-Name
+		reverse_proxy 127.0.0.1:4000 {
+			import stream
+		}
+	}
+
+	# MCP gateway (/llm/<server>/mcp): machine clients authenticate with LiteLLM virtual keys, like the model API
+	@mcp path /llm/*/mcp /llm/*/mcp/*
+	handle @mcp {
 		request_header -Remote-User
 		request_header -Remote-Groups
 		request_header -Remote-Email

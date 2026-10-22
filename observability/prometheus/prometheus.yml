@@ -29,12 +29,6 @@ scrape_configs:
         labels:
           model: qwen3.6-35b
 
-  - job_name: vllm-vision
-    static_configs:
-      - targets: ["model-runner:10002"]
-        labels:
-          model: qwen3-vl-30b
-
   - job_name: alloy
     static_configs:
       - targets: ["alloy:12345"]

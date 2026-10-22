@@ -25,6 +25,12 @@ gen authelia_session     "$(rand 32)"
 gen authelia_storage_key "$(rand 32)"
 gen litellm_master_key   "sk-$(rand 24)"
 gen litellm_db_password  "$(rand 24)"
+gen grafana_admin_password "$(rand 24)"
+
+# Prometheus runs as nobody and reads this file to scrape LiteLLM /llm/metrics
+chmod 644 "$SECRETS/litellm_master_key"
+# Grafana runs as uid 472 and reads this file for its built-in admin account
+chmod 644 "$SECRETS/grafana_admin_password"
 
 if [[ ! -s "$SECRETS/hf_token" ]]; then
   read -r -s -p "Hugging Face token (leave empty to fill in later): " HF
@@ -49,4 +55,4 @@ fi
 
 echo
 echo "Generate an Authelia password hash with:"
-echo "  docker run --rm -it authelia/authelia:4 authelia crypto hash generate argon2"
+echo "  docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2"
