@@ -58,7 +58,8 @@
 | Vision | The agent model itself (Qwen3.6-35B-A3B is natively multimodal; there is no separate vision model) | Tested: accepts images |
 | Image gen | **ComfyUI** + FLUX.1-schnell (fp8 checkpoint), **comfy-mcp** | The agent gets a link to the picture, not the bytes (§15) |
 | Agent | **OpenClaw** in an **OpenShell** sandbox, onboarded by **NemoClaw** | |
-| Admin | **admin-dashboard** (FastAPI + HTMX) | Status, Up/Down, idle unloader |
+| Admin | **admin-dashboard** (FastAPI + HTMX) | Status, Up/Down, idle unloader, OpenClaw device approval, `/connect` sign-in link |
+| Command bridge | **ops-bridge** (FastAPI) | The only way a container may run a command in another container; fixed allow-list in `ops-bridge/actions.yaml` (§14) |
 | Observability | **Alloy → Prometheus / Loki / Tempo → Grafana** | GPU via `nvidia-smi` textfile (DCGM is broken on GB10) |
 
 ---
@@ -178,6 +179,7 @@ flowchart TB
 | `/` and any unmatched path | 302 redirect → `/admin/` | — | — | — |
 | `/auth/*` | authelia `127.0.0.1:9091` | public (login portal) | kept · `server.address: …/auth` | native |
 | `/admin/*` | admin-dashboard `127.0.0.1:9000` | Authelia · `admins` · 2FA | stripped · `uvicorn --root-path /admin` | native |
+| `/connect` | admin-dashboard `127.0.0.1:9000` | Authelia · `admins` or `users` · 2FA | kept (the dashboard serves it at the root) | native |
 | `/openclaw/*` | OpenClaw `127.0.0.1:18789` (NemoClaw port forward) | Authelia · 2FA, then the OpenClaw **gateway token** + a paired device | kept · `gateway.controlUi.basePath: "/openclaw"` | native |
 | `/llm/v1/*` | litellm `127.0.0.1:4000` | **LiteLLM virtual key** (Bearer); Authelia rule is `bypass`, Caddy strips `Remote-*` | kept · `SERVER_ROOT_PATH=/llm` | native |
 | `/llm/<server>/mcp` | **not public.** On the public site it falls under `/llm*` (Authelia). The sandbox uses Caddy's second listener `https://172.17.0.1:8443/llm/<server>/mcp`: **LiteLLM virtual key** (Bearer, per-key MCP grants), Caddy strips `Remote-*`, everything else on that port is 404 | key | kept | native |
@@ -189,7 +191,7 @@ flowchart TB
 flowchart LR
     F["Funnel :443"] --> C{"Caddy<br/>127.0.0.1:9080"}
     C -- "/auth" --> A["authelia"]
-    C -- "/admin" --> FA1(["forward_auth"]) --> D["dashboard"]
+    C -- "/admin, /connect" --> FA1(["forward_auth"]) --> D["dashboard"]
     C -- "/openclaw" --> FA2(["forward_auth"]) --> O["openclaw"]
     C -- "/llm/v1" --> K(["Bearer key"]) --> L["litellm"]
     C -- "/llm" --> FA3(["forward_auth"]) --> L
@@ -252,30 +254,32 @@ sequenceDiagram
 
 ### OpenClaw login (token mode)
 
-NemoClaw's start script writes the gateway token into `openclaw.json` every time the sandbox container starts, and OpenClaw refuses `trusted-proxy` auth while a token exists. So Authelia SSO cannot sign you into OpenClaw (this was tried: the container then exits at start). What works:
+NemoClaw's start script writes the gateway token into `openclaw.json` every time the sandbox container starts, and OpenClaw refuses `trusted-proxy` auth while a token exists. So Authelia SSO cannot sign you into OpenClaw (this was tried: the container then exits at start). The gateway has **one shared token**, so there are no per-user tokens; what the stack adds is a one-click way to hand the token to the right people and to control which browsers may connect:
 
-1. Sign in through Authelia, open `https://<PUBLIC_HOST>/openclaw/`.
-2. Paste the gateway token (`nemoclaw <sandbox> dashboard-url --quiet` prints a URL containing `token=…`; treat it like a password), or open the URL with `#token=…` on the public host.
-3. The first connection from a browser creates a pairing request. Approve it in a sandbox shell (`nemoclaw <sandbox> connect`): `openclaw devices list`, then `openclaw devices approve <request-id> --token "$TOKEN"` (read the token with `read -rs TOKEN`; `openclaw gateway auth-token --show` refuses to print into a captured variable). The CLI's own `operator.admin` scope upgrade has to be approved first. Or turn the check off (`VARIABLES.md`, `openclaw/openclaw.patch.json5`: `dangerouslyDisableDeviceAuth`, a security trade-off).
+1. **Sign-in link.** A member of `admins` or `users` opens `https://<PUBLIC_HOST>/connect` (after Authelia and 2FA). The dashboard reads the gateway token through ops-bridge and redirects to `/openclaw/#token=…`. The Control UI stores the token and then removes it from the address bar (so a missing `#token` after the redirect is normal). The redirect is `no-store` with no referrer, and the token never appears in a log.
+2. **Device pairing.** The first connection from a browser creates a pairing request. An admin approves it with one click in the dashboard's *OpenClaw devices* card (§14), or opens an enrollment window ("Open for 10 min") in which new browser pairings are approved automatically while the person signs in. Approved browsers are labelled after whoever opened `/connect` just before.
+3. **Control per person** is therefore: group membership in Authelia (who can reach `/connect` at all), the device list (which browsers are paired) and *Revoke* (cuts one browser off). Removing someone fully means deleting their Authelia user *and* revoking their devices, or rotating the gateway token by re-onboarding.
+
+Fallbacks, without the dashboard: print the token with `nemoclaw <sandbox> dashboard-url --quiet` (a URL containing `token=…`; treat it as a password) and approve devices in a sandbox shell (`nemoclaw <sandbox> connect`: `openclaw devices list`, then `openclaw devices approve <request-id> --token "$TOKEN"`; read the token with `read -rs TOKEN`, since `openclaw gateway auth-token --show` refuses to print into a captured variable). The CLI's own `operator.admin` scope upgrade has to be approved first. Or turn the check off (`VARIABLES.md`, `openclaw/openclaw.patch.json5`: `dangerouslyDisableDeviceAuth`, a security trade-off).
 
 ### Groups & policy
 
 | Group | Access |
 |---|---|
 | `admins` | Everything (`/admin`, `/grafana`, `/comfy`, `/llm` UI, `/openclaw`) |
-| `users` | `/openclaw` only (`two_factor`) |
+| `users` | `/openclaw` and `/connect` only (`two_factor`) |
 | everyone else | **deny** (`default_policy: deny`) |
 
-Session: 12 h expiry, 1 h inactivity; cookie scoped to `PUBLIC_HOST`; the notifier writes to a file in `/data` (no SMTP), so TOTP/WebAuthn enrolment links are read from `notification.txt`. Both TOTP and passkeys are accepted as the second factor (passkeys are second-factor only; `enable_passkey_login` is not set), and `users.yml` is mounted read-write so password changes can be saved. Grafana auto-signs-up proxy users with the **Admin** org role (only `admins` can reach it) and trusts the proxy header only from `172.16.0.0/12` and `127.0.0.1`.
+Session: 12 h expiry, 1 h inactivity; cookie scoped to `PUBLIC_HOST`; the notifier is SMTP when `SMTP_ADDRESS` is set in `.env` (§13.3) and otherwise a file in `/data`, so without SMTP the TOTP/WebAuthn enrolment and reset links are read from `notification.txt`. Both TOTP and passkeys are accepted as the second factor (passkeys are second-factor only; `enable_passkey_login` is not set), and `users.yml` is mounted read-write so password changes can be saved. Grafana auto-signs-up proxy users with the **Admin** org role (only `admins` can reach it) and trusts the proxy header only from `172.16.0.0/12` and `127.0.0.1`.
 
-**Recovery (admin, on the server; no email).** If a user loses every second factor, delete them and let the user re-enrol:
+**Recovery (admin, on the server).** If a user loses every second factor, delete them and let the user re-enrol:
 
 ```bash
 docker compose exec authelia authelia storage user totp delete <username> --config /config/configuration.yml
 docker compose exec authelia authelia storage user webauthn delete <username> --all --config /config/configuration.yml
 ```
 
-The user then signs in with their password and enrols again; the verification link is in `/data/notification.txt` inside the Authelia container (`docker compose exec authelia cat /data/notification.txt`). A forgotten password is reset by writing a new argon2 hash into `authelia/users.yml`. Users should enrol two second factors so this stays rare.
+The user then signs in with their password and enrols again; the verification link is e-mailed, or without SMTP is in `/data/notification.txt` inside the Authelia container (`docker compose exec authelia cat /data/notification.txt`). A forgotten password is reset by the user with **Reset password** on the sign-in page (link by e-mail or file); the admin fallback is writing a new argon2 hash into `authelia/users.yml`. Users should enrol two second factors so this stays rare.
 
 ---
 
@@ -374,6 +378,7 @@ flowchart LR
 | 17 | node-exporter | `prom/node-exporter:<pinned>` | — | `obs` | always |
 | 18 | cadvisor | `ghcr.io/google/cadvisor:<pinned ≥ Docker 25 support>` | — | `obs` | always · **privileged** |
 | 19 | gpu-exporter | built: `ubuntu:24.04` + `nvidia-smi` loop (GPU via the shared `deploy…devices` block, same as model-runner and comfyui) | — | none (`network_mode: none`; shares the `textfile` volume) | always |
+| 20 | ops-bridge | built: `python:3.12-slim` (mounts `/var/run/docker.sock` read-write; read-only root, no capabilities) | — | `ai` | always |
 
 > **Two bridge addresses are involved.** `${DOCKER_BRIDGE_IP}` (`172.21.0.1` here) is the gateway of NemoClaw's `openshell-docker` network: what the sandbox sees as `host.openshell.internal`, where LiteLLM `:4000` and Alloy `:4318` publish. `172.17.0.1` (`docker0`, always present) is where Caddy's HTTPS MCP listener binds (`caddy/Caddyfile`, `scripts/nemoclaw-setup.sh`). Neither is reachable from outside the host. `DOCKER_BRIDGE_IP` is only known after NemoClaw has created its network: start with `172.17.0.1`, switch after the first onboarding (§17 step 8).
 
@@ -684,7 +689,7 @@ All files live at the repository root. Clone it anywhere on the GB10 (the compos
 .                                        # repo root = /srv/ai-stack on the host
 ├── gb10-agent-stack.md                  # this document
 ├── VARIABLES.md                         # every value to set/check, per file
-├── compose.yaml                         # 17 services (the OpenShell gateway and the OpenClaw sandbox are created by NemoClaw)
+├── compose.yaml                         # 18 services (the OpenShell gateway and the OpenClaw sandbox are created by NemoClaw)
 ├── README.md                            # start here: what this is, how to bring it up, where everything is
 ├── TO-VERIFY.md                         # what was tested, what was assumed, what is still open
 ├── TODO.md                              # planned work
@@ -693,9 +698,10 @@ All files live at the repository root. Clone it anywhere on the GB10 (the compos
 ├── scripts/
 │   ├── init-secrets.sh                  # generates secrets/, .env, users.yml (never overwrites)
 │   ├── create-litellm-keys.sh           # openclaw-sandbox · laptop · scripts keys → secrets/litellm_keys.json
+│   ├── add-user.sh                      # new Authelia user; they set their own password via "Reset password"
 │   └── nemoclaw-setup.sh                # install · ca · onboard · mcp · config (the NemoClaw/OpenClaw steps)
 ├── secrets/                             # git-ignored · chmod 700 · authelia_{jwt,session,storage_key}, litellm_master_key,
-│                                        #   litellm_db_password, grafana_admin_password, litellm.env, hf_token, litellm_keys.json
+│                                        #   litellm_db_password, grafana_admin_password, bridge_dashboard_token, authelia_smtp_password, litellm.env, hf_token, litellm_keys.json
 ├── data/                                # git-ignored: comfy-output/ (ComfyUI images), caddy-root.crt (exported by nemoclaw-setup.sh ca)
 ├── caddy/Caddyfile
 ├── authelia/
@@ -715,9 +721,14 @@ All files live at the repository root. Clone it anywhere on the GB10 (the compos
 ├── dashboard/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   ├── app.py                           # FastAPI · status · Up/Down · ComfyUI idle unloader
-│   ├── templates/{index.html, partials/status.html}
+│   ├── app.py                           # FastAPI · status · Up/Down · ComfyUI idle unloader · /connect · device routes
+│   ├── devices.py                       # OpenClaw devices through ops-bridge: approve/reject/revoke, enrollment window, labels
+│   ├── templates/{index.html, partials/status.html, partials/devices.html}
 │   └── static/htmx.min.js               # vendored htmx 2.0.4 (no third-party script is loaded); see static/README.md
+├── ops-bridge/
+│   ├── Dockerfile  requirements.txt
+│   ├── app.py                           # generic allow-listed command bridge (exec / restart / logs on named containers)
+│   └── actions.yaml                     # THE list of what may be run, by whom, with which parameters
 ├── openclaw/openclaw.patch.json5        # gateway public origin / base path, applied in the sandbox by nemoclaw-setup.sh config
 └── observability/
     ├── alloy/config.alloy
@@ -764,7 +775,20 @@ All files live at the repository root. Clone it anywhere on the GB10 (the compos
 
 After onboarding: `scripts/nemoclaw-setup.sh mcp` runs `nemoclaw <sandbox> mcp add comfy_image --url https://172.17.0.1:8443/llm/comfy_image/mcp --env LITELLM_MCP_KEY --trusted-private-host 172.17.0.1`. Managed MCP accepts only HTTPS, rejects `host.openshell.internal` and loopback, and treats the Funnel hostname as a private address (it resolves to the tailnet IP, which containers cannot reach). Then `scripts/nemoclaw-setup.sh config` applies the OpenClaw patch.
 
-### 13.3 Tailscale Funnel
+### 13.3 Users and e-mail
+
+Add a person with `scripts/add-user.sh <username> <email> [users|admins] [display name]`. It creates the Authelia account with a random password nobody knows; the person presses **Reset password** on the sign-in page, gets a link, sets their own password and enrols a second factor. Authelia watches `users.yml`, so no restart is needed. `users` members can reach `/openclaw` and `/connect`; `admins` can reach everything.
+
+E-mail is optional. With `SMTP_ADDRESS` empty in `.env`, Authelia writes links to `/data/notification.txt` (read it on the server and pass the link on). To send real mail, use any SMTP service; this setup used **Brevo**:
+
+1. Create a Brevo account; under *SMTP & API* create an **SMTP key**; under *Senders* add and verify the address mail will come from.
+2. In `.env`: `SMTP_ADDRESS=smtp://smtp-relay.brevo.com:587`, `SMTP_USERNAME=<SMTP login shown by Brevo>`, `SMTP_SENDER=<verified sender>`.
+3. Store the key without printing it: `read -rs k && printf '%s' "$k" > secrets/authelia_smtp_password`.
+4. `docker compose up -d authelia`, then press **Reset password** for your own user to test. With a personal sender address (Gmail, Proton) check the spam folder, and do not send from a Proton address to a Proton address: Proton silently drops it although Brevo reports "Delivered". Mail to another provider's address worked. To change a user's e-mail edit `email:` in `users.yml` (through the container); nothing else needs to change.
+
+`authelia/configuration.yml` picks the notifier from `SMTP_ADDRESS` by templating; STARTTLS (`smtp://…:587`) or implicit TLS (`submissions://…:465`) is mandatory, so the key never crosses the network in clear.
+
+### 13.4 Tailscale Funnel
 
 ```bash
 sudo tailscale funnel --bg http://127.0.0.1:9080     # public :443 → Caddy
@@ -808,6 +832,11 @@ The tailnet policy must grant the node the `funnel` node attribute.
 | `POST` | `/api/models/{id}/down` | llama-swap `POST /api/models/unload/{id}` (`404` for an unknown model; `501` only if llama-swap lacks the endpoint, which v265 does not) |
 | `POST` | `/api/image/warm` | Queue a 1-step 256 px workflow (also resets the idle timer) |
 | `POST` | `/api/image/free` | ComfyUI `POST /free {"unload_models": true, "free_memory": true}` |
+| `GET` | `/partials/devices` | *OpenClaw devices* card (admins; HTMX polls every 5 s) |
+| `POST` | `/api/openclaw/requests/{id}/approve` · `/reject` | Approve or reject a pending pairing request |
+| `POST` | `/api/openclaw/devices/{device_id}/revoke` | Invalidate the device's token and remove it from the list |
+| `POST` | `/api/openclaw/enrollment/open` · `/close` | Start or end the auto-approve window (default 10 min) |
+| `GET` | `/connect` | Admins and `users`: 302 to `/openclaw/#token=<gateway token>` (`no-store`, no referrer); 503 page if the sandbox or bridge is down; 403 for other groups. Outside `/admin`: Caddy routes it to the dashboard |
 | `GET` | `/healthz` | Liveness |
 
 | Data | Source |
@@ -818,7 +847,11 @@ The tailnet policy must grant the node the `funnel` node attribute.
 | Sandbox / OpenClaw | Container whose name contains `NEMOCLAW_SANDBOX` |
 | Memory / GPU | Prometheus (`node_memory_MemAvailable_bytes`, `gb10_gpu_*`) |
 
-**AuthZ:** read routes need a `Remote-User` header (401 otherwise); every mutating route requires `admins ∈ Remote-Groups` (403 otherwise). Model IDs are regex-validated before being passed to llama-swap.
+**AuthZ:** read routes need a `Remote-User` header (401 otherwise); every mutating route requires `admins ∈ Remote-Groups` (403 otherwise), except `/connect`, which also admits `users`. Model IDs, request IDs and device IDs are regex-validated before use.
+
+**OpenClaw devices and ops-bridge.** The dashboard has no access to the sandbox. Every device operation is an action on **ops-bridge**, a small internal service with its own bearer token for each client (`secrets/bridge_dashboard_token`). `ops-bridge/actions.yaml` is the complete list of what it will do: each action is a fixed command in one named container, with parameters checked against patterns and passed as separate arguments (never through a shell). The OpenClaw actions enter the sandbox's nested network namespace as the sandbox user and read the gateway token from `openclaw.json` (a plain `docker exec` cannot reach the gateway). An action a client is not allowed to call is indistinguishable from one that does not exist. Every call is written to the audit log; the token action logs neither parameters nor output. Other containers can be given other actions by adding a client and entries to the file, with no code change.
+
+*Enrollment window.* *Open for 10 min* auto-approves new pairings from the browser Control UI only (never scope upgrades, never the CLI) and labels each device after the single person who opened `/connect` in the preceding 10 minutes. With zero or several candidates the device is approved unlabelled. Funnel shows every visitor as the same ingress address, so labels come from timing, not IP; treat them as hints.
 
 ---
 
@@ -875,9 +908,9 @@ flowchart LR
 | Machine auth | LiteLLM virtual keys with model allow-lists, RPM caps, budgets |
 | Header spoofing | `forward_auth copy_headers` overwrites; `/llm/v1` and the MCP listener strip `Remote-*` |
 | Sandbox | NemoClaw Balanced policy. Inference only through `inference.local` (OpenShell holds the key). MCP only to `172.17.0.1:8443`, restricted to MCP methods, with a certificate verified against Caddy's CA. Telemetry egress is not configured yet |
-| OpenClaw access | Authelia + 2FA in front; the gateway token and device pairing behind it (§5). `dangerouslyDisableDeviceAuth` is optional and weakens the second check |
+| OpenClaw access | Authelia + 2FA in front; the shared gateway token (handed out by `/connect` to `admins`/`users` only) and per-browser device pairing behind it (§5). Admins approve and revoke browsers in the dashboard. `dangerouslyDisableDeviceAuth` is optional and weakens the second check |
 | Caddy CA | Caddy's local root signs the MCP listener's certificate; its key is in the `caddy_data` volume. The sandbox is built to trust that root, so protect the volume like a secret |
-| Docker socket | **rw:** none in compose (the NemoClaw-managed gateway uses it on the host). `docker-socket-proxy` mounts it `:ro`, but a read-only mount of a Unix socket does **not** restrict API calls; the restriction is the proxy's allow-list (`CONTAINERS`, `INFO`, `NETWORKS`; `POST=0`). `admin-dashboard` and `alloy` reach Docker only through the proxy and have no socket mount. `cadvisor` mounts `/var/run` (which contains `docker.sock`) and runs **privileged** with `/`, `/sys`, `/var/lib/docker` mounted, so treat it as root-equivalent. Nothing public has socket access |
+| Docker socket | **rw:** only `ops-bridge` (it must `docker exec`). It is reachable only from the internal `ai` network with a per-client bearer token, publishes no port, has a read-only root, no capabilities and `no-new-privileges`, and can run only the actions in `actions.yaml` (fixed commands, validated parameters). Treat it as root-equivalent on the host and keep the action list short. The NemoClaw-managed gateway also uses the socket on the host. `docker-socket-proxy` mounts it `:ro`, but a read-only mount of a Unix socket does **not** restrict API calls; the restriction is the proxy's allow-list (`CONTAINERS`, `INFO`, `NETWORKS`; `POST=0`). `admin-dashboard` and `alloy` reach Docker only through the proxy and have no socket mount. `cadvisor` mounts `/var/run` (which contains `docker.sock`) and runs **privileged** with `/`, `/sys`, `/var/lib/docker` mounted, so treat it as root-equivalent. Nothing public has socket access |
 | Secrets | Docker secrets / `secrets/` `chmod 700`; never in `.env`, never in the sandbox. LiteLLM reads its master key and DB URL from `secrets/litellm.env` (`env_file`); Prometheus gets the master key as a Docker secret to scrape `/llm/metrics` |
 | Optional hardening | Use Tailscale's Funnel request header to restrict `/admin`, `/grafana`, `/llm` UI to **tailnet-only** while `/openclaw` and `/llm/v1` stay public. To take everything off the internet: `tailscale funnel --https=443 off` |
 | Updates | Pin all image tags; Renovate/diun for update notices; never auto-pull `latest` |
@@ -922,6 +955,8 @@ $EDITOR authelia/users.yml          # your login name, e-mail, group `admins`, a
 docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2
 ```
 
+Optional now or later: e-mail for Authelia (§13.3) and more users (`scripts/add-user.sh`).
+
 ### 3 · Model weights
 
 ```bash
@@ -959,7 +994,7 @@ docker compose up -d --build alloy prometheus loki tempo grafana node-exporter c
 sudo tailscale funnel --bg http://127.0.0.1:9080 && tailscale funnel status   # off again: tailscale funnel --https=443 off
 ```
 
-Open `https://<PUBLIC_HOST>/` from any device: Authelia login → it asks for a second factor. There is no e-mail: read the one-time code or enrolment link on the server with `docker compose exec authelia cat /data/notification.txt`, then register a TOTP app and/or a passkey (register two). Browsing `http://127.0.0.1:9080` directly gives a 400: Authelia only accepts your `*.ts.net` host.
+Open `https://<PUBLIC_HOST>/` from any device: Authelia login → it asks for a second factor. Without SMTP (§13.3) read the one-time code or enrolment link on the server with `docker compose exec authelia cat /data/notification.txt` (with SMTP it arrives by e-mail), then register a TOTP app and/or a passkey (register two). Browsing `http://127.0.0.1:9080` directly gives a 400: Authelia only accepts your `*.ts.net` host.
 
 ### 7 · NemoClaw: install and trust Caddy's CA
 
@@ -997,10 +1032,12 @@ If `mcp` says "found non-prefix partial state", an earlier attempt left pieces b
 
 ### 10 · OpenClaw login
 
-1. `nemoclaw <sandbox> dashboard-url --quiet` prints a URL containing `token=…` (a password; do not share it).
-2. Open `https://<PUBLIC_HOST>/openclaw/`, sign in through Authelia, paste the token and press Connect.
-3. If it says "Device pairing required", approve the browser in a sandbox shell (`nemoclaw <sandbox> connect`), see §5. The CLI needs `--token`, so read the token with `read -rs TOKEN` after running `openclaw gateway auth-token --show` (it refuses to print into `$(...)`).
+1. Open `https://<PUBLIC_HOST>/connect`, sign in through Authelia. You land in `/openclaw/` with the gateway token already applied (the Control UI then removes it from the address bar).
+2. The first connection from a browser says "Device pairing required". In the admin dashboard, *OpenClaw devices* card, press **Approve** next to the pending request (or press *Open for 10 min* before signing in and new browsers approve themselves). Reload the OpenClaw tab if it does not reconnect.
+3. Fallback without the dashboard: `nemoclaw <sandbox> dashboard-url --quiet` for the token and approve in a sandbox shell, see §5.
 4. Start a fresh chat and ask: "Generate an image of a red bicycle." The reply should contain a picture served from `https://<PUBLIC_HOST>/comfy/view?…` (your logged-in browser loads it through Authelia). The first image loads FLUX and takes a minute or two.
+
+To give someone else access: `scripts/add-user.sh <name> <email>`, tell them to use **Reset password**, then to open `/connect`; approve their browser in the dashboard.
 
 ### Operating notes
 
@@ -1008,6 +1045,8 @@ If `mcp` says "found non-prefix partial state", an earlier attempt left pieces b
 - **Never switch the gateway to `trusted-proxy` auth.** NemoClaw re-adds its token at every container start, so the sandbox container then exits at start (`trusted-proxy and token auth are mutually exclusive`) and OpenShell marks it `Error`; recovery is to fix the config file in the stopped container (`docker cp`) and `docker start` it, or to re-onboard. Back up `~/.nemoclaw/rebuild-backups` before experiments.
 - **Reloading the model** (editing `llama-swap.yaml`, restarting `model-runner`) takes 3 to 4 minutes; OpenClaw requests and image generation wait or fail meanwhile.
 - **Admin access recovery** (lost second factor, forgotten password): §5.
+- **After re-onboarding the sandbox** the gateway token and device list are new: everyone's browser is unpaired; `/connect` hands out the new token, and `dangerouslyDisableDeviceAuth` (if you set it) must be set again.
+- **Restarting Authelia** signs everyone out; harmless, but warn people in the middle of onboarding.
 - **Everything off the internet:** `tailscale funnel --https=443 off`.
 
 ---
@@ -1017,7 +1056,10 @@ If `mcp` says "found non-prefix partial state", an earlier attempt left pieces b
 - [ ] `ss -tlnp` — no `0.0.0.0` listeners except `tailscaled`; bridge listeners only on `172.17.0.1` (Caddy `:8443`) and `${DOCKER_BRIDGE_IP}` (LiteLLM `:4000`, Alloy `:4318`)
 - [ ] From an **off-tailnet** device: `https://<PUBLIC_HOST>/` → Authelia login → 2FA → dashboard
 - [ ] `/grafana`, `/comfy`, `/llm/ui`, `/openclaw` all redirect to `/auth` when logged out; `/llm/comfy_image/mcp` on the public host does too
-- [ ] A `users`-group account can open `/openclaw` but gets `403` on `/admin`
+- [ ] A `users`-group account can open `/openclaw` and `/connect` but gets `403` on `/admin`
+- [ ] `/connect` redirects to `/openclaw/#token=…` for `admins`/`users` and returns 403 for any other group; the dashboard *OpenClaw devices* card lists, approves and revokes a test browser (revoked device leaves the list)
+- [ ] ops-bridge, called from another container on the `ai` network: `POST /v1/actions/<name>` without the token → `401`; an action not in that client's `allow` list → `403`
+- [ ] `scripts/add-user.sh test test@example.com` then **Reset password** produces a link (mail or notification file); remove the test user afterwards
 - [ ] `curl /llm/v1/models` without key → `401`; with `laptop` key → model list
 - [ ] Sending a forged `Remote-User` header to `/llm/v1` or a protected path has no effect
 - [ ] Prometheus targets are up (`vllm-agent` is up while the model is loaded)
@@ -1041,6 +1083,7 @@ The detailed log (what was tested on this host, with results) is `TO-VERIFY.md`;
 | `scripts/nemoclaw-setup.sh` end to end on a clean machine | Each command was run by hand; the script itself was only exercised for `ca`, `config --dry-run`, `notes` and syntax |
 | Real-browser checks of `/comfy/` and the dashboard, Funnel's real forwarded headers, that sign-out ends the Authelia session | Listed in `TO-VERIFY.md` |
 | Tailscale Funnel request header name for tailnet-only admin hardening | Optional hardening |
+| A real SMTP provider (Brevo), and a second person's full onboarding (`add-user.sh` → reset link → `/connect` → approval) | Only a mock SMTP server and the dashboard routes were tested; see `TO-VERIFY.md` |
 
 Resolved during bring-up: the OpenShell gateway is NemoClaw-managed (no container); the model is multimodal (no vision model); the llama-swap arm64 asset and unload endpoint (v265); the OpenClaw SSO route (`trusted-proxy`) does not work with NemoClaw 0.0.137, so OpenClaw uses its gateway token; MCP goes over HTTPS on `172.17.0.1:8443`.
 

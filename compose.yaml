@@ -28,6 +28,10 @@ secrets:
     file: ./secrets/hf_token
   grafana_admin_password:
     file: ./secrets/grafana_admin_password
+  bridge_dashboard_token:
+    file: ./secrets/bridge_dashboard_token
+  authelia_smtp_password:                  # empty unless SMTP_ADDRESS is set in .env
+    file: ./secrets/authelia_smtp_password
 
 volumes:
   authelia_data: {}
@@ -60,11 +64,14 @@ services:
     environment:
       X_AUTHELIA_CONFIG_FILTERS: template
       PUBLIC_HOST: ${PUBLIC_HOST}
+      SMTP_ADDRESS: ${SMTP_ADDRESS:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_SENDER: ${SMTP_SENDER:-}
       AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /run/secrets/authelia_jwt
       AUTHELIA_SESSION_SECRET_FILE: /run/secrets/authelia_session
       AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage_key
       TZ: ${TZ}
-    secrets: [authelia_jwt, authelia_session, authelia_storage_key]
+    secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password]
     volumes:
       - ./authelia:/config:ro
       - ./authelia/users.yml:/config/users.yml   # read-write so password resets/changes in the UI can be saved
@@ -185,6 +192,29 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
+  # Generic, allow-listed operations on other containers (ops-bridge/actions.yaml). The only service with read-write Docker socket
+  # access in this file, so it is built to be small: no published port, internal network only, a fixed catalogue of actions,
+  # per-client secrets, audit log on stdout.
+  ops-bridge:
+    build: ./ops-bridge
+    restart: unless-stopped
+    networks: [ai]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    secrets: [bridge_dashboard_token]
+    environment:
+      BRIDGE_CONFIG: /config/actions.yaml
+      NEMOCLAW_SANDBOX: ${NEMOCLAW_SANDBOX}
+    volumes:
+      - ./ops-bridge/actions.yaml:/config/actions.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9200/healthz',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   admin-dashboard:
     build: ./dashboard
     restart: unless-stopped
@@ -198,9 +228,16 @@ services:
       DOCKER_URL: http://docker-socket-proxy:2375
       PROMETHEUS_URL: http://prometheus:9090
       ADMIN_GROUP: admins
+      USER_GROUP: users
       NEMOCLAW_SANDBOX: ${NEMOCLAW_SANDBOX}
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      BRIDGE_URL: http://ops-bridge:9200
+    secrets: [bridge_dashboard_token]
     volumes:
       - ./comfyui/workflows:/app/workflows:ro
+    depends_on:
+      ops-bridge:
+        condition: service_healthy
 
   # ─────────────────────────── Observability ───────────────────────────
   alloy:

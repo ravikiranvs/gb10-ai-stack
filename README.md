@@ -10,7 +10,7 @@ A self-hosted AI agent stack on one NVIDIA GB10 (DGX Spark class, arm64): a loca
 | [`VARIABLES.md`](VARIABLES.md) | Every value you set or must check, file by file, and the values that must match across files |
 | [`TO-VERIFY.md`](TO-VERIFY.md) | What was tested on the real host (and how), what was assumed, what is still open |
 | [`TODO.md`](TODO.md) | Planned work that is not part of the current setup |
-| `compose.yaml`, `.env.example`, `caddy/`, `authelia/`, `litellm/`, `model-runner/`, `comfyui/`, `comfy-mcp/`, `dashboard/`, `observability/`, `openclaw/`, `scripts/` | The configuration itself |
+| `compose.yaml`, `.env.example`, `caddy/`, `authelia/`, `litellm/`, `model-runner/`, `comfyui/`, `comfy-mcp/`, `dashboard/`, `ops-bridge/`, `observability/`, `openclaw/`, `scripts/` | The configuration itself |
 
 ## Bring-up in one screen
 
@@ -29,13 +29,14 @@ scripts/nemoclaw-setup.sh onboard                  # first run: fix DOCKER_BRIDG
 scripts/nemoclaw-setup.sh mcp && scripts/nemoclaw-setup.sh config && scripts/nemoclaw-setup.sh notes
 ```
 
-Then sign in at `https://<PUBLIC_HOST>/` (Authelia, two factors) and open `/openclaw/` with the gateway token (§17 step 10).
+Then sign in at `https://<PUBLIC_HOST>/` (Authelia, two factors), open `/connect` to land in OpenClaw, and approve the browser in the dashboard's *OpenClaw devices* card (§17 step 10).
 
 ## Things that will surprise you
 
-- **No e-mail anywhere.** Authelia writes one-time codes to a file in its container: `docker compose exec authelia cat /data/notification.txt`.
+- **E-mail is optional.** Without `SMTP_ADDRESS` in `.env`, Authelia writes one-time codes and reset links to a file: `docker compose exec authelia cat /data/notification.txt`. Setting up Brevo (or any SMTP service) is §13.3 of the design document.
 - **`127.0.0.1:9080` cannot be browsed directly** (400 from Authelia); use your `*.ts.net` address.
-- **OpenClaw needs its own gateway token** on top of Authelia; single sign-on into OpenClaw does not work with NemoClaw 0.0.137 (§5).
+- **OpenClaw needs its own gateway token** on top of Authelia; single sign-on into OpenClaw does not work with NemoClaw 0.0.137 (§5). `https://<PUBLIC_HOST>/connect` hands the token to signed-in users and the admin dashboard approves their browsers.
+- **Adding a person:** `scripts/add-user.sh <name> <email>`; they use **Reset password** on the sign-in page, then `/connect`.
 - **`DOCKER_BRIDGE_IP` is the gateway of NemoClaw's `openshell-docker` network**, known only after the first onboarding (§8 of the runbook).
 - **Do not generate images while the agent model is loading** (a reload takes 3 to 4 minutes): vLLM sizes its cache from free memory at start-up (§11).
 - **Secrets are never printed or committed**: `secrets/`, `.env`, `authelia/users.yml`, `data/` are git-ignored.
@@ -44,5 +45,5 @@ Then sign in at `https://<PUBLIC_HOST>/` (Authelia, two factors) and open `/open
 
 ```text
 compose.yaml  .env.example  scripts/  secrets/ (git-ignored)  data/ (git-ignored)
-caddy/ authelia/ litellm/ model-runner/ comfyui/ comfy-mcp/ dashboard/ openclaw/ observability/
+caddy/ authelia/ litellm/ model-runner/ comfyui/ comfy-mcp/ dashboard/ ops-bridge/ openclaw/ observability/
 ```

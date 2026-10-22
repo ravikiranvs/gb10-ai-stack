@@ -49,6 +49,9 @@
     <div id="status" hx-get="partials/status" hx-trigger="load, every 5s" hx-swap="innerHTML">
       <div class="card">Loading…</div>
     </div>
+    {% if who.admin %}
+    <div id="devices" hx-get="partials/devices" hx-trigger="load, every 5s" hx-swap="innerHTML"></div>
+    {% endif %}
     <div class="card links">
       <h2>Apps</h2>
       <a href="/openclaw/">OpenClaw</a>

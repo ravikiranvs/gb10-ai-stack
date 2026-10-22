@@ -1,0 +1,63 @@
+<div class="card">
+  <h2>OpenClaw devices</h2>
+  {% if error %}
+    <p><span class="dot bad"></span>{{ error }}</p>
+  {% else %}
+    {% if notice %}<p><span class="dot warn"></span>{{ notice }}</p>{% endif %}
+
+    <div class="stats" style="margin: 0 0 14px">
+      <div>Enrollment
+        {% if remaining %}
+          <b><span class="dot ok"></span>open · {{ (remaining // 60) }}m {{ remaining % 60 }}s left</b>
+          <button hx-post="api/openclaw/enrollment/close" hx-target="#devices">Close</button>
+        {% else %}
+          <b><span class="dot"></span>closed</b>
+          <button hx-post="api/openclaw/enrollment/open" hx-target="#devices"
+                  hx-confirm="Approve new browsers automatically for {{ minutes }} minutes?">Open for {{ minutes }} min</button>
+        {% endif %}
+      </div>
+      <div>Sign-in link <b><code>{{ connect_url }}</code></b></div>
+    </div>
+
+    <table>
+      <thead><tr><th>Pending request</th><th>From</th><th>Wants</th><th>Age</th><th></th></tr></thead>
+      <tbody>
+      {% for p in d.pending %}
+        <tr>
+          <td>{{ p.name }}<br><small style="color:var(--muted)">{{ p.kind }} · {{ p.device_id | short }}…{% if p.client %} · {{ p.client }}{% endif %}</small></td>
+          <td>{{ p.ip or "—" }}{% if p.suggested_user %}<br><small style="color:var(--muted)">likely {{ p.suggested_user }}</small>{% endif %}</td>
+          <td><small>{{ p.scopes | length }} scopes{% if 'operator.admin' in p.scopes %} · <b>admin</b>{% endif %}</small></td>
+          <td>{{ p.age_s | ago }}</td>
+          <td>
+            <button hx-post="api/openclaw/requests/{{ p.request_id }}/approve" hx-target="#devices"
+                    {% if 'operator.admin' in p.scopes and not p.is_browser %}hx-confirm="Approve a non-browser client that asks for admin scope?"{% endif %}>Approve</button>
+            <button hx-post="api/openclaw/requests/{{ p.request_id }}/reject" hx-target="#devices">Reject</button>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" style="color:var(--muted)">No pending requests</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <table style="margin-top: 14px">
+      <thead><tr><th>Paired device</th><th>From</th><th>Approved</th><th>Last seen</th><th></th></tr></thead>
+      <tbody>
+      {% for x in d.paired %}
+        <tr>
+          <td><span class="dot {{ 'ok' if x.connected else '' }}"></span>{{ x.label or x.platform or x.client or "device" }}
+            <br><small style="color:var(--muted)">{{ x.device_id | short }}…{% if x.client %} · {{ x.client }}{% endif %}</small></td>
+          <td>{{ x.ip or "—" }}</td>
+          <td><small>{{ x.via or "—" }}</small></td>
+          <td>{% if x.connected %}now{% else %}{{ x.seen_s | ago }}{% endif %}</td>
+          <td>{% if 'operator' in x.roles %}
+            <button hx-post="api/openclaw/devices/{{ x.device_id }}/revoke" hx-target="#devices"
+                    hx-confirm="Revoke this device? It has to pair again.">Revoke</button>{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" style="color:var(--muted)">No paired devices</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>

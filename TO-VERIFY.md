@@ -8,14 +8,19 @@ Last updated: 2026-10-22, after the stack, NemoClaw and OpenClaw were running en
 
 - **Core services start and stay healthy** with the pinned tags in `.env.example`: Authelia, LiteLLM + Postgres, model-runner (llama-swap v265 + vLLM 0.29), ComfyUI, comfy-mcp, Caddy, the dashboard, Grafana, Prometheus, Loki, Tempo, Alloy, node-exporter, cAdvisor, gpu-exporter. All Prometheus targets are up (`vllm-agent` only while the model is loaded).
 - **Login path**: Funnel → Caddy → Authelia → dashboard, Grafana (auth-proxy) and LiteLLM UI, with TOTP/passkey and the one-time code read from `/data/notification.txt`. The `ts.net` cookie works.
+- **Image generation in OpenClaw**: the agent calls the tool and the markdown picture shows in the OpenClaw chat (checked in a real browser).
 - **Public API**: `/llm/v1/chat/completions` through Funnel with a LiteLLM key, including an 86 s streamed completion (5,532 tokens) with nothing cut off.
 - **Model lifecycle**: cold start 332 s (empty caches) → 200 s (caches) → 209 s measured after a reload; `ttl: 0` plus the startup preload keeps it loaded; `--max-model-len 131072` gives a 609,334-token KV cache (4.65× at 131k).
 - **Observability** (throwaway project and later live): OTLP → Alloy → Tempo/Loki/Prometheus, span metrics, container logs through the socket proxy, Grafana datasources healthy, every dashboard query returns data (vLLM names checked against the installed source).
 - **NemoClaw 0.0.137**: installed (HTTP/1.1 workaround), gateway created and managed by NemoClaw, sandbox `nemoclaw-assistant` created with the custom endpoint (`inference.local` smoke test passes), CA baked in by a fresh onboard, MCP registered over `https://172.17.0.1:8443` ("credential resolution verified on the wire, HTTP 200"), OpenClaw config patch applied, browser login with gateway token + device pairing, chat answers through LiteLLM, the agent finds and calls `comfy_image-generate_image`, the result is a short link instead of image bytes.
 - **Caddy MCP listener**: certificate with IP SAN verifies against the exported root; 401 without a key, 200 with the sandbox key, 403 with a key without MCP grant, 404 elsewhere; the public site now sends `/llm/*/mcp` to Authelia.
+- **ops-bridge + dashboard Devices card**: bad/missing token 401; unknown or not-allowed action 403; bad parameters 422; ambiguous target 409; timeout 504; the audit log hides sensitive output. Through the dashboard: list, approve, reject, revoke (revoke + remove, so the entry leaves the list) and the enrollment window were exercised on real browsers; `/connect` (Authelia → Caddy → dashboard) lands in OpenClaw with the token, which the Control UI then strips from the address bar (by design).
+- **Authelia SMTP** (against a mock SMTP server only): the AUTH login arrives with the exact secret, including quotes and colons; the reset mail has the right From/To/Subject; without `SMTP_ADDRESS` the filesystem notifier still writes the link. `scripts/add-user.sh` creates the account, Authelia reloads `users.yml` without a restart, duplicate user/e-mail are rejected.
 - **Docker socket**: Alloy and the dashboard read Docker only through `docker-socket-proxy` (`CONTAINERS`, `INFO`, `NETWORKS`, `POST=0`).
 
 ## Findings that shaped the design (all verified the hard way)
+
+- Brevo accepted and reported "Delivered" for a reset mail whose sender and recipient were both the same `@protonmail.com` address, but Proton silently discarded it (not in Inbox, Spam, All Mail or Trash). The same mail to a Gmail address arrived. A sender on a freemail domain that is also the recipient's domain fails that provider's DMARC policy; a domain you own (with Brevo's SPF/DKIM) avoids it.
 
 - NemoClaw's external-gateway mode is systemd-only on `127.0.0.1`, so the OpenShell gateway is **not** a compose service.
 - `host.openshell.internal` resolves to the **`openshell-docker` network gateway**, not `docker0` → `DOCKER_BRIDGE_IP`.
@@ -32,9 +37,10 @@ Last updated: 2026-10-22, after the stack, NemoClaw and OpenClaw were running en
 - [ ] **`scripts/nemoclaw-setup.sh` end to end on a clean machine.** Only `ca`, `config --dry-run`, `notes` and syntax were run through the script; `install`, `onboard` and `mcp` repeat commands that ran by hand.
 - [ ] **Reboot behaviour**: the NemoClaw gateway user service and sandbox come back; `${DOCKER_BRIDGE_IP}` exists before LiteLLM/Alloy start (they retry with `restart: unless-stopped`); the model preloads.
 - [ ] **OpenClaw telemetry**: sandbox egress to `host.openshell.internal:4318` (a network policy; presets are empty) and the `diagnostics-otel` plugin. Then check traces in Tempo.
-- [ ] **Does the OpenClaw UI render the markdown image** the agent returns, and does the Authelia cookie apply inside the embedded view? (The link itself opens in a logged-in browser.)
-- [ ] **Real-browser checks** of `/comfy/` (frontend sub-path), the dashboard, sign-out ending the Authelia session, and Funnel's real forwarded headers.
 - [ ] **Real image-understanding quality** of the agent model on screenshots, charts and small text.
+- [ ] **Complete a reset through the e-mailed link** (set a password, enrol a second factor) for a second user. The mail itself is verified: Brevo (SMTP key, no IP restriction) delivers the reset mail to a Gmail inbox from a Proton sender address.
+- [ ] **A second person's end-to-end onboarding**: `add-user.sh` → reset link → sign in → `/connect` → Approve (or enrollment window) → chat. Also whether an Authelia restart or password reset interferes with a half-finished onboarding.
+- [ ] **Device labels**: the `devices rename` step runs after an approval; confirm in the paired list that the label shows (the field is `operatorLabel`, confirmed on the real paired-device JSON; a live rename after an approval has not been seen yet).
 - [ ] **A `users`-group account** reaching `/openclaw` but not `/admin`; the self-service password change with the read-write `users.yml` mount.
 - [ ] **The agent's `AGENTS.md` image note** is not in the repo (it lives in the sandbox workspace); `scripts/nemoclaw-setup.sh notes` re-adds it after a fresh onboard.
 - [ ] Smaller: why weight loading takes about 130 s; ComfyUI's CUDA JIT cache across container re-creation; output-folder growth and root-owned files in `data/comfy-output`; the dashboard's ComfyUI "hot" label is its own flag and does not read the GPU; the MCP policy rejects the session-closing `DELETE` (noise only).

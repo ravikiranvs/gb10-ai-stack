@@ -26,11 +26,15 @@ gen authelia_storage_key "$(rand 32)"
 gen litellm_master_key   "sk-$(rand 24)"
 gen litellm_db_password  "$(rand 24)"
 gen grafana_admin_password "$(rand 24)"
+[[ -e "$SECRETS/authelia_smtp_password" ]] || { : > "$SECRETS/authelia_smtp_password"; echo "created  secrets/authelia_smtp_password (empty: fill it only if you enable SMTP)"; }
+gen bridge_dashboard_token  "$(rand 32)"     # the dashboard's credential for ops-bridge
 
 # Prometheus runs as nobody and reads this file to scrape LiteLLM /llm/metrics
 chmod 644 "$SECRETS/litellm_master_key"
 # Grafana runs as uid 472 and reads this file for its built-in admin account
 chmod 644 "$SECRETS/grafana_admin_password"
+# the dashboard container runs as a non-root user and reads its ops-bridge secret
+chmod 644 "$SECRETS/bridge_dashboard_token"
 
 if [[ ! -s "$SECRETS/hf_token" ]]; then
   read -r -s -p "Hugging Face token (leave empty to fill in later): " HF

@@ -16,6 +16,7 @@ webauthn:
 authentication_backend:
   file:
     path: /config/users.yml
+    watch: true                    # pick up users added by scripts/add-user.sh without a restart
     password:
       algorithm: argon2
 
@@ -29,6 +30,7 @@ access_control:
     - domain: '{{ env "PUBLIC_HOST" }}'
       resources:
         - '^/openclaw([/?].*)?$'
+        - '^/connect$'
       subject:
         - 'group:admins'
         - 'group:users'
@@ -60,5 +62,14 @@ storage:
     path: /data/db.sqlite3
 
 notifier:
-  filesystem:
+{{- if env "SMTP_ADDRESS" }}
+  smtp:
+    address: '{{ env "SMTP_ADDRESS" }}'              # smtp://host:587 (STARTTLS) or submissions://host:465 (TLS)
+    username: '{{ env "SMTP_USERNAME" }}'
+    password: {{ secret "/run/secrets/authelia_smtp_password" | trim | msquote }}
+    sender: 'GB10 AI Stack <{{ env "SMTP_SENDER" }}>'
+    subject: '[GB10 AI Stack] {title}'
+{{- else }}
+  filesystem:                                          # no SMTP configured: one-time links are written here
     filename: /data/notification.txt
+{{- end }}

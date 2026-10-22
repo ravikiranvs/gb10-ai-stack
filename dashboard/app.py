@@ -12,9 +12,11 @@ from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+import devices
 
 LLAMA_SWAP_URL = os.environ.get("LLAMA_SWAP_URL", "http://model-runner:8000")
 COMFY_URL = os.environ.get("COMFY_URL", "http://comfyui:8188")
@@ -23,6 +25,7 @@ COMFY_IDLE_SECONDS = int(os.environ.get("COMFY_IDLE_MINUTES", "10")) * 60
 DOCKER_URL = os.environ.get("DOCKER_URL", "http://docker-socket-proxy:2375")
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
 ADMIN_GROUP = os.environ.get("ADMIN_GROUP", "admins")
+USER_GROUP = os.environ.get("USER_GROUP", "users")
 NEMOCLAW_SANDBOX = os.environ.get("NEMOCLAW_SANDBOX", "nemoclaw-assistant")
 
 MODEL_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -203,14 +206,17 @@ async def warm_comfy() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    task = asyncio.create_task(comfy_idle_watcher())
+    tasks = [asyncio.create_task(comfy_idle_watcher()), asyncio.create_task(devices.enrollment_watcher())]
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="GB10 AI Stack", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+templates.env.filters["ago"] = devices.ago
+templates.env.filters["short"] = devices.short
 
 
 # ─────────────────────────── routes ───────────────────────────
@@ -273,6 +279,92 @@ async def image_free(request: Request):
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"ComfyUI /free failed: {exc}") from exc
     return await status_partial(request)
+
+
+# ─────────────────────────── OpenClaw devices ───────────────────────────
+
+async def devices_partial(request: Request, notice: str | None = None) -> HTMLResponse:
+    require_admin(request)
+    data, error = {"pending": [], "paired": []}, None
+    try:
+        data = await devices.list_devices()
+    except devices.BridgeError as exc:
+        error = str(exc)
+    ctx = {"who": identity(request), "d": data, "error": error, "notice": notice, "remaining": devices.window_remaining(),
+           "enroll_by": devices.state.enroll_by, "minutes": devices.ENROLL_MINUTES,
+           "connect_url": f"https://{devices.PUBLIC_HOST}/connect" if devices.PUBLIC_HOST else "/connect"}
+    return templates.TemplateResponse(request, "partials/devices.html", ctx)
+
+
+@app.get("/partials/devices", response_class=HTMLResponse)
+async def devices_view(request: Request):
+    return await devices_partial(request)
+
+
+def _device_action(fn):
+    """Run a bridge operation for an admin and re-render the card; failures show in the card instead of a bare error page."""
+    async def wrapper(request: Request, *args):
+        who = require_admin(request)
+        try:
+            await fn(*args, who["user"])
+        except devices.BridgeError as exc:
+            return await devices_partial(request, notice=str(exc))
+        return await devices_partial(request)
+    return wrapper
+
+
+@app.post("/api/openclaw/requests/{request_id}/approve", response_class=HTMLResponse)
+async def request_approve(request_id: str, request: Request):
+    if not devices.REQUEST_ID.match(request_id):
+        raise HTTPException(400, "Invalid request id")
+    return await _device_action(devices.approve)(request, request_id)
+
+
+@app.post("/api/openclaw/requests/{request_id}/reject", response_class=HTMLResponse)
+async def request_reject(request_id: str, request: Request):
+    if not devices.REQUEST_ID.match(request_id):
+        raise HTTPException(400, "Invalid request id")
+    return await _device_action(devices.reject)(request, request_id)
+
+
+@app.post("/api/openclaw/devices/{device_id}/revoke", response_class=HTMLResponse)
+async def device_revoke(device_id: str, request: Request):
+    if not devices.DEVICE_ID.match(device_id):
+        raise HTTPException(400, "Invalid device id")
+    return await _device_action(devices.revoke)(request, device_id)
+
+
+@app.post("/api/openclaw/enrollment/open", response_class=HTMLResponse)
+async def enrollment_open(request: Request):
+    who = require_admin(request)
+    devices.open_window(who["user"])
+    return await devices_partial(request)
+
+
+@app.post("/api/openclaw/enrollment/close", response_class=HTMLResponse)
+async def enrollment_close(request: Request):
+    who = require_admin(request)
+    devices.close_window(who["user"])
+    return await devices_partial(request)
+
+
+@app.get("/connect")
+async def connect(request: Request):
+    """Signed-in people (Authelia has already asked for their second factor) land in OpenClaw with the gateway token filled in."""
+    who = identity(request)
+    if not (who["admin"] or USER_GROUP in who["groups"]):
+        raise HTTPException(403, f"Requires group '{ADMIN_GROUP}' or '{USER_GROUP}'")
+    try:
+        token = await devices.gateway_token()
+    except devices.BridgeError as exc:
+        return HTMLResponse(f"<!doctype html><title>OpenClaw</title><body style='font:16px system-ui;padding:2rem'>"
+                            f"<h1>OpenClaw is not available</h1><p>{exc}. Try again in a minute.</p></body>", status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    devices.record_connect(who["user"])
+    devices.audit(action="connect", user=who["user"])
+    # The token travels in the URL fragment, which the browser never sends to a server.
+    return RedirectResponse(f"https://{devices.PUBLIC_HOST}/openclaw/#token={token}", status_code=302,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
 @app.get("/healthz")

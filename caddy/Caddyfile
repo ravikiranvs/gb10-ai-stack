@@ -80,6 +80,12 @@ http://:9080 {
 		}
 	}
 
+	# One-click sign-in to OpenClaw for any signed-in admin or user (the dashboard hands over the gateway token)
+	handle /connect {
+		import authelia
+		reverse_proxy 127.0.0.1:9000
+	}
+
 	# Admin dashboard (prefix stripped after auth; uvicorn --root-path /admin)
 	redir /admin /admin/
 	handle /admin/* {

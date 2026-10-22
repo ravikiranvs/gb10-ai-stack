@@ -1,0 +1,106 @@
+# ops-bridge: the complete list of what other containers may ask this service to do.
+#
+# A client (a container with a secret) can call only the actions its `allow` list names; an action is a fixed operation on one
+# target container. Nothing outside this file can be run, and request parameters are matched against the patterns below and
+# handed over as separate arguments (never as part of a shell string).
+#
+# Action kinds:
+#   exec     run `argv` in the target container.  Parameters: an argv element that is exactly "{name}" is replaced by the
+#            validated value. exec options:
+#              user                  Docker exec user (use root for the options below)
+#              env                   fixed environment variables
+#              env_from_json_file    ENV: {file, key}  reads a value (dotted key) from a JSON file in the target container
+#              netns_of_process      {argv0: NAME}  enter the network namespace of the process with that argv[0]
+#                                    (the OpenShell sandbox runs in a nested namespace that plain `docker exec` cannot reach)
+#              run_as                switch to this user (after entering the namespace)
+#            Needs python3 in the target container when any of the last three is used.
+#   restart  restart the target container
+#   logs     return the last `tail` lines of its log
+# target: `name` (a regex matched against container names) or `label` (key=value). It must select exactly one running container.
+# ${VAR} in a target is replaced from the bridge's environment (compose passes NEMOCLAW_SANDBOX).
+# `sensitive: true` keeps the parameters and result out of the audit log.
+
+clients:
+  dashboard:
+    token_file: /run/secrets/bridge_dashboard_token
+    allow: ["openclaw.devices.*", "openclaw.gateway_token"]
+
+actions:
+
+  # ───────── OpenClaw inside the NemoClaw sandbox ─────────
+  # The CLI talks to the gateway on the sandbox's loopback with the shared gateway token, which is read from openclaw.json
+  # and passed in the environment (never on a command line, never in the response).
+
+  openclaw.devices.list:
+    description: Pending pairing requests and paired devices
+    kind: exec
+    target: {name: "--${NEMOCLAW_SANDBOX}-"}
+    exec: &openclaw_cli
+      user: root
+      netns_of_process: {argv0: openclaw-gateway}
+      run_as: sandbox
+      env: {HOME: /sandbox}
+      env_from_json_file:
+        OPENCLAW_GATEWAY_TOKEN: {file: /sandbox/.openclaw/openclaw.json, key: gateway.auth.token}
+    argv: [openclaw, devices, list, --json]
+    output: json
+
+  openclaw.devices.approve:
+    description: Approve a pending pairing request
+    kind: exec
+    target: {name: "--${NEMOCLAW_SANDBOX}-"}
+    exec: *openclaw_cli
+    argv: [openclaw, devices, approve, "{request_id}", --json]
+    params:
+      request_id: {pattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
+    output: json
+
+  openclaw.devices.reject:
+    description: Reject a pending pairing request
+    kind: exec
+    target: {name: "--${NEMOCLAW_SANDBOX}-"}
+    exec: *openclaw_cli
+    argv: [openclaw, devices, reject, "{request_id}", --json]
+    params:
+      request_id: {pattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
+    output: json
+
+  openclaw.devices.revoke:
+    description: Revoke a paired device's token for one role (the device must pair again)
+    kind: exec
+    target: {name: "--${NEMOCLAW_SANDBOX}-"}
+    exec: *openclaw_cli
+    argv: [openclaw, devices, revoke, --device, "{device_id}", --role, "{role}", --json]
+    params:
+      device_id: {pattern: "[0-9a-f]{64}"}
+      role: {pattern: "[a-z]{1,32}", default: operator}
+    output: json
+
+  openclaw.devices.remove:
+    description: Remove a paired device entry from the list (revoke its tokens first, or it can reconnect until they expire)
+    kind: exec
+    target: {name: "--${NEMOCLAW_SANDBOX}-"}
+    exec: *openclaw_cli
+    argv: [openclaw, devices, remove, "{device_id}", --json]
+    params:
+      device_id: {pattern: "[0-9a-f]{64}"}
+    output: json
+
+  openclaw.devices.rename:
+    description: Give a paired device a label
+    kind: exec
+    target: {name: "--${NEMOCLAW_SANDBOX}-"}
+    exec: *openclaw_cli
+    argv: [openclaw, devices, rename, --device, "{device_id}", --name, "{label}", --json]
+    params:
+      device_id: {pattern: "[0-9a-f]{64}"}
+      label: {pattern: "[A-Za-z0-9][A-Za-z0-9 ._@:+-]{0,63}", max_length: 64}
+    output: json
+
+  openclaw.gateway_token:
+    description: The shared OpenClaw gateway token (handed to signed-in users by the dashboard's /connect page)
+    kind: exec
+    target: {name: "--${NEMOCLAW_SANDBOX}-"}
+    exec: {user: root}
+    argv: [python3, -c, "import json;print(json.load(open('/sandbox/.openclaw/openclaw.json'))['gateway']['auth']['token'])"]
+    sensitive: true
