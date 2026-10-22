@@ -126,7 +126,7 @@ note = ("- Images: to create an image, use the `comfy_image-generate_image` MCP 
 if "comfy_image-generate_image" in s:
     print("AGENTS.md already has the image note")
 elif marker not in s:
-    print("AGENTS.md has no '### Local notes' section; add the note by hand (see TO-VERIFY.md)")
+    print("AGENTS.md has no '### Local notes' section; add the note by hand (text: the `note` string in this script)")
 else:
     open(p, 'w').write(s.replace(marker, marker + note, 1))
     print("AGENTS.md updated")

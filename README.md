@@ -1,49 +1,126 @@
 # GB10 AI stack
 
-A self-hosted AI agent stack on one NVIDIA GB10 (DGX Spark class, arm64): a local agent model behind a LiteLLM gateway, image generation through ComfyUI, an OpenClaw agent in an OpenShell sandbox (NemoClaw), authentication with Authelia, a single public HTTPS port through Tailscale Funnel, and Grafana/Prometheus/Loki/Tempo for observability. Everything that runs as a service is a Docker Compose container, except NemoClaw (a host CLI) and the OpenShell gateway and sandbox it creates.
+A self-hosted AI agent stack for one NVIDIA GB10 (DGX Spark class, arm64, Ubuntu 24.04). Everything is Docker Compose except NemoClaw, a host CLI that creates the OpenShell sandbox the OpenClaw agent runs in.
 
-## Where to look
+- **Agent model:** Qwen3.6-35B-A3B (NVFP4) on vLLM, behind llama-swap and LiteLLM (OpenAI API, virtual keys, MCP gateway).
+- **Images:** FLUX schnell on ComfyUI, exposed to the agent as an MCP tool.
+- **Agent:** OpenClaw in a NemoClaw/OpenShell sandbox.
+- **Access:** one public HTTPS port (Tailscale Funnel) → Caddy → Authelia (password + TOTP/passkey).
+- **Ops:** admin dashboard, Grafana/Prometheus/Loki/Tempo, `ops-bridge` for allow-listed container actions.
 
-| File | What it is |
+| Doc | Read it for |
 |---|---|
-| [`gb10-agent-stack.md`](gb10-agent-stack.md) | The design: architecture, routing, authentication, request flows, security, and the **bring-up runbook (§17)** |
-| [`VARIABLES.md`](VARIABLES.md) | Every value you set or must check, file by file, and the values that must match across files |
-| [`TO-VERIFY.md`](TO-VERIFY.md) | What was tested on the real host (and how), what was assumed, what is still open |
-| [`TODO.md`](TODO.md) | Planned work that is not part of the current setup |
-| `compose.yaml`, `.env.example`, `caddy/`, `authelia/`, `litellm/`, `model-runner/`, `comfyui/`, `comfy-mcp/`, `dashboard/`, `ops-bridge/`, `observability/`, `openclaw/`, `scripts/` | The configuration itself |
+| this file | Bring-up, daily operations, troubleshooting |
+| [`gb10-agent-stack.md`](gb10-agent-stack.md) | How it fits together: routing, auth, security, model lifecycle |
+| [`VARIABLES.md`](VARIABLES.md) | Every setting, and which values must match across files |
+| [`TO-VERIFY.md`](TO-VERIFY.md) / [`TODO.md`](TODO.md) | What was tested, what is open / planned work |
 
-## Bring-up in one screen
+## Requirements
 
-Details and explanations are in §17 of the design document. Run from the repository root.
+- GB10 host, NVIDIA driver working, Docker 29 with GPU support (`docker run --rm --gpus all ubuntu:24.04 nvidia-smi`), your user in the `docker` group.
+- Tailscale logged in, HTTPS certificates and Funnel enabled for the tailnet.
+- Internet access to Docker Hub, `nvcr.io`, GHCR, Hugging Face, GitHub, npm. About 100 GB of disk for models.
+- `sudo mkdir -p /srv/models/{hf,comfy/checkpoints} && sudo chown -R "$USER" /srv/models`
 
+## Bring-up
+
+Run from the repository root. A full first run takes about an hour, mostly downloads and builds.
+
+**1. Secrets and config**
 ```bash
-bash scripts/init-secrets.sh                       # secrets/, .env, authelia/users.yml
-$EDITOR .env authelia/users.yml                    # PUBLIC_HOST, your user and password hash
-# download the two models (commands in §17 step 3), then:
-docker compose up -d --build authelia litellm-db litellm model-runner comfyui comfy-mcp
-bash scripts/create-litellm-keys.sh
-docker compose up -d --build alloy prometheus loki tempo grafana node-exporter cadvisor gpu-exporter docker-socket-proxy caddy admin-dashboard
-sudo tailscale funnel --bg http://127.0.0.1:9080   # public HTTPS; off again: tailscale funnel --https=443 off
-scripts/nemoclaw-setup.sh install && scripts/nemoclaw-setup.sh ca
-scripts/nemoclaw-setup.sh onboard                  # first run: fix DOCKER_BRIDGE_IP and `nemoclaw onboard --resume` (§17 step 8)
-scripts/nemoclaw-setup.sh mcp && scripts/nemoclaw-setup.sh config && scripts/nemoclaw-setup.sh notes
+bash scripts/init-secrets.sh                 # secrets/, data/, .env, authelia/users.yml (asks for an optional HF token)
+$EDITOR .env                                 # set PUBLIC_HOST (your *.ts.net name); leave DOCKER_BRIDGE_IP for now
+docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2   # paste the hash into authelia/users.yml
+$EDITOR authelia/users.yml                   # your login, e-mail, group `admins`, the hash
 ```
 
-Then sign in at `https://<PUBLIC_HOST>/` (Authelia, two factors), open `/connect` to land in OpenClaw, and approve the browser in the dashboard's *OpenClaw devices* card (§17 step 10).
+**2. Model weights** (neither model is gated)
+```bash
+docker compose build model-runner
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e HF_HOME=/models/hf -v /srv/models/hf:/models/hf \
+  --entrypoint hf ai-stack-model-runner download nvidia/Qwen3.6-35B-A3B-NVFP4
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e HF_HOME=/tmp/hf -v /srv/models/comfy:/models/comfy \
+  --entrypoint hf ai-stack-model-runner download Comfy-Org/flux1-schnell flux1-schnell-fp8.safetensors --local-dir /models/comfy/checkpoints
+rm -rf /srv/models/comfy/checkpoints/.cache
+```
+
+**3. Start the stack**
+```bash
+docker compose up -d --build authelia litellm-db litellm model-runner comfyui comfy-mcp
+bash scripts/create-litellm-keys.sh          # → secrets/litellm_keys.json: openclaw-sandbox, laptop, scripts
+docker compose up -d --build alloy prometheus loki tempo grafana node-exporter cadvisor gpu-exporter docker-socket-proxy ops-bridge caddy admin-dashboard
+```
+`model-runner` loads the agent model at start: about 6 minutes the first time, 3 to 4 after. Ready when `docker compose exec -T model-runner curl -s localhost:8000/running` shows `"state":"ready"`. **Do not generate images while it loads** (vLLM sizes its cache from free memory; FLUX loading at the same time makes it fail).
+
+**4. Go public and sign in**
+```bash
+sudo tailscale funnel --bg http://127.0.0.1:9080        # off again: tailscale funnel --https=443 off
+```
+Open `https://<PUBLIC_HOST>/`, sign in, and enrol a second factor (register two: TOTP and/or passkeys). Without SMTP the one-time link is in `docker compose exec authelia cat /data/notification.txt`. Browsing `127.0.0.1:9080` directly returns 400; use the `*.ts.net` name.
+
+**5. NemoClaw sandbox**
+```bash
+scripts/nemoclaw-setup.sh install            # NemoClaw CLI; ends with an expected CDI warning
+scripts/nemoclaw-setup.sh ca                 # exports Caddy's root CA (the sandbox must trust it)
+scripts/nemoclaw-setup.sh onboard            # 3 to 8 minutes
+```
+The first `onboard` ends with `inference.local returned transient HTTP 503`. Expected: `host.openshell.internal` is the gateway of the `openshell-docker` network that NemoClaw just created, not `docker0`. Point LiteLLM and Alloy at it, then resume (the model must be loaded):
+```bash
+GW=$(docker network inspect openshell-docker --format '{{(index .IPAM.Config 0).Gateway}}')
+sed -i "s/^DOCKER_BRIDGE_IP=.*/DOCKER_BRIDGE_IP=$GW/" .env
+docker compose up -d litellm alloy
+nemoclaw onboard --resume                    # ends "OpenClaw is ready"
+```
+Then:
+```bash
+scripts/nemoclaw-setup.sh mcp                # registers the image tool; ends "credential resolution verified … HTTP 200"
+scripts/nemoclaw-setup.sh config             # OpenClaw public origin and base path
+scripts/nemoclaw-setup.sh notes              # tells the agent to use the image tool
+```
+
+**6. Use OpenClaw**
+
+Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first connection from a browser shows "Device pairing required": approve it in the dashboard (`/admin/`, *OpenClaw devices* card). Ask the agent for an image; the first one takes a minute or two while FLUX loads.
+
+## Daily operations
+
+| Task | How |
+|---|---|
+| Add a person | `scripts/add-user.sh <login> <email> [users\|admins]`. They press **Reset password** on the sign-in page, then open `/connect`; you approve their browser. `users` get OpenClaw only; `admins` get everything |
+| Let a group of people in quickly | Dashboard → *OpenClaw devices* → **Open for 10 min**: new browsers approve themselves and are labelled by who opened `/connect` |
+| Remove a person | Delete their block in `authelia/users.yml` (via `docker compose exec authelia`, see [VARIABLES](VARIABLES.md#users-authelia)) and **Revoke** their devices in the dashboard |
+| Lost second factor | `docker compose exec authelia authelia storage user totp delete <login> --config /config/configuration.yml` (and `webauthn delete <login> --all`); they sign in and enrol again |
+| API access | `secrets/litellm_keys.json` → `Authorization: Bearer <key>` to `https://<PUBLIC_HOST>/llm/v1/…` |
+| Read an Authelia link without SMTP | `docker compose exec authelia cat /data/notification.txt` |
+| Everything off the internet | `tailscale funnel --https=443 off` |
+
+**E-mail (optional).** Authelia sends reset links and one-time codes by SMTP. Without it they go to a file. To enable (Brevo shown; any SMTP service works): create an SMTP key, put it in `secrets/authelia_smtp_password` (`read -rs k && printf '%s' "$k" > secrets/authelia_smtp_password`, no trailing newline), set `SMTP_ADDRESS` (`smtp://smtp-relay.brevo.com:587`), `SMTP_USERNAME` and `SMTP_SENDER` (a verified sender) in `.env`, then `docker compose up -d authelia`. If the service has IP allow-listing and your IP changes, switch it off. A sender and recipient on the same freemail domain (for example both `@protonmail.com`) can be silently dropped: use a different recipient domain or your own domain.
 
 ## Things that will surprise you
 
-- **E-mail is optional.** Without `SMTP_ADDRESS` in `.env`, Authelia writes one-time codes and reset links to a file: `docker compose exec authelia cat /data/notification.txt`. Setting up Brevo (or any SMTP service) is §13.3 of the design document.
-- **`127.0.0.1:9080` cannot be browsed directly** (400 from Authelia); use your `*.ts.net` address.
-- **OpenClaw needs its own gateway token** on top of Authelia; single sign-on into OpenClaw does not work with NemoClaw 0.0.137 (§5). `https://<PUBLIC_HOST>/connect` hands the token to signed-in users and the admin dashboard approves their browsers.
-- **Adding a person:** `scripts/add-user.sh <name> <email>`; they use **Reset password** on the sign-in page, then `/connect`.
-- **`DOCKER_BRIDGE_IP` is the gateway of NemoClaw's `openshell-docker` network**, known only after the first onboarding (§8 of the runbook).
-- **Do not generate images while the agent model is loading** (a reload takes 3 to 4 minutes): vLLM sizes its cache from free memory at start-up (§11).
-- **Secrets are never printed or committed**: `secrets/`, `.env`, `authelia/users.yml`, `data/` are git-ignored.
+- **OpenClaw needs its own gateway token** on top of Authelia (NemoClaw rewrites it at every start, so single sign-on is impossible). `/connect` hands it to signed-in users; the token is shared, control is by Authelia group and the device list. The Control UI strips `#token=` from the address bar after reading it: normal.
+- **Re-onboarding the sandbox** (needed to change image input, reasoning, context window or the CA) resets OpenClaw config, MCP registration, the gateway token and the device list. Re-run `mcp`, `config`, `notes`; everyone reconnects via `/connect`.
+- **Never set OpenClaw `gateway.auth` to `trusted-proxy`.** The sandbox container then exits at start.
+- **Reloading the model** (editing `model-runner/llama-swap.yaml`, restarting `model-runner`) takes 3 to 4 minutes; chat and image calls wait or fail meanwhile.
+- **`DOCKER_BRIDGE_IP` must equal the `openshell-docker` gateway.** `nemoclaw-setup.sh` warns when it does not.
+- **GitHub drops HTTP/2 clones from this host**: `nemoclaw-setup.sh install` forces HTTP/1.1 and retries.
+- Secrets, `.env`, `authelia/users.yml` and `data/` are git-ignored. Nothing prints secret values.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Login loops or lands on `http://` | `PUBLIC_HOST` in `.env` must be the exact `*.ts.net` name; `docker compose logs authelia caddy` |
+| `/connect` or dashboard says the bridge/sandbox is down | `docker compose ps ops-bridge`; `docker ps` shows `openshell-default--<sandbox>-…`; `nemoclaw <sandbox> status` |
+| Agent never answers | Model still loading (`/running`), or `DOCKER_BRIDGE_IP` is wrong |
+| Agent draws SVG instead of calling the image tool | `scripts/nemoclaw-setup.sh notes` |
+| `mcp` says "non-prefix partial state" | `nemoclaw <sandbox> mcp remove comfy_image`, delete the leftover provider (`openshell provider list` / `delete`), rerun |
+| No reset e-mail | `docker compose logs authelia`, then the SMTP service's log; see the same-domain note above |
+| `vLLM: No available memory for the cache blocks` | ComfyUI loaded FLUX during start-up: free it (dashboard → *Free*) and restart `model-runner` |
 
 ## Layout
 
 ```text
-compose.yaml  .env.example  scripts/  secrets/ (git-ignored)  data/ (git-ignored)
-caddy/ authelia/ litellm/ model-runner/ comfyui/ comfy-mcp/ dashboard/ ops-bridge/ openclaw/ observability/
+compose.yaml  .env.example  scripts/  secrets/ data/ (git-ignored)
+caddy/  authelia/  litellm/  model-runner/  comfyui/  comfy-mcp/  dashboard/  ops-bridge/  openclaw/  observability/
 ```

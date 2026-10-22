@@ -1,6 +1,6 @@
 # TODO
 
-Planned work that is not part of the current setup. For things that still need checking, see `TO-VERIFY.md`.
+Planned work that is not part of the current setup. Things still to check are in `TO-VERIFY.md`.
 
 ## OpenClaw / NemoClaw
 
@@ -21,7 +21,7 @@ Planned work that is not part of the current setup. For things that still need c
 - [ ] **Dashboard: real ComfyUI state.** The "hot/unloaded" label is the dashboard's own flag; read ComfyUI's GPU use instead (`/system_stats`).
 - [ ] **Pin the floating base images** (`ubuntu:24.04`, `python:3.12-slim`).
 - [ ] **Image output cleanup.** `data/comfy-output` grows without bound and holds root-owned files.
-- [ ] **Alerts.** None are provisioned (suggestions in the design doc §9).
+- [ ] **Alerts.** None are provisioned. Candidates: GPU temperature, memory headroom, agent model down, gpu-exporter stale, LiteLLM 5xx rate.
 
 ## Observability
 
