@@ -1,0 +1,18 @@
+// Applied inside the NemoClaw sandbox by `scripts/nemoclaw-setup.sh config` (it fills in __PUBLIC_HOST__ from .env):
+//   openclaw config patch --stdin   (run as the sandbox user)
+// openclaw.json is authoritative after first launch, survives restarts, and `nemoclaw rebuild` restores it.
+//
+// Only the public address of the Control UI is set here. Leave `gateway.auth` alone: NemoClaw's start script rewrites the gateway
+// token on every container start, and OpenClaw refuses `trusted-proxy` auth while a token is configured, so SSO into OpenClaw
+// is not possible with NemoClaw 0.0.137. Authelia gates the URL; the browser also needs the gateway token and a paired device.
+//
+// The model, provider and inference route are written by `nemoclaw onboard`; there is deliberately no `agents` block.
+{
+  gateway: {
+    publicOrigin: "https://__PUBLIC_HOST__",
+    controlUi: {
+      basePath: "/openclaw",
+      allowedOrigins: ["http://127.0.0.1:18789", "https://__PUBLIC_HOST__"],
+    },
+  },
+}

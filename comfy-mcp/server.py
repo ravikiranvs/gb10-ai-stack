@@ -7,6 +7,7 @@ import random
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlencode
 
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
@@ -17,6 +18,10 @@ DEFAULT_STEPS = int(os.environ.get("COMFY_DEFAULT_STEPS", "4"))
 TIMEOUT_SECONDS = int(os.environ.get("COMFY_TIMEOUT_SECONDS", "600"))
 # The LiteLLM MCP gateway drops any MCP message over ~1 MiB, and base64 adds a third, so keep the image under ~780 KB.
 MAX_IMAGE_BYTES = int(os.environ.get("COMFY_MAX_IMAGE_BYTES", "700000"))
+# Browser-reachable base of ComfyUI (Caddy strips /comfy), used for the link returned to the agent.
+PUBLIC_URL = os.environ.get("COMFY_PUBLIC_URL", "").rstrip("/")
+# Return the picture inline as well. Off by default: OpenClaw hands tool-result images to the model as base64 text, which overflows its context.
+INLINE_IMAGE = os.environ.get("COMFY_INLINE_IMAGE", "false").lower() in ("1", "true", "yes")
 JPEG_QUALITIES = (90, 80, 70, 60, 50, 40)
 HOST, PORT = os.environ.get("MCP_BIND", "0.0.0.0:9100").rsplit(":", 1)
 
@@ -42,7 +47,7 @@ def build_workflow(prompt: str, negative: str, width: int, height: int, steps: i
     return wf
 
 
-async def run_workflow(wf: dict) -> tuple[bytes, int]:
+async def run_workflow(wf: dict, want_jpeg: bool) -> tuple[dict, bytes | None, int | None]:
     async with httpx.AsyncClient(base_url=COMFY_URL, timeout=30) as client:
         r = await client.post("/prompt", json={"prompt": wf, "client_id": str(uuid.uuid4())})
         if r.status_code >= 400:
@@ -60,6 +65,8 @@ async def run_workflow(wf: dict) -> tuple[bytes, int]:
                 images = entry.get("outputs", {}).get(NODE_SAVE, {}).get("images", [])
                 if images:
                     img = images[0]
+                    if not want_jpeg:
+                        return img, None, None
                     # Ask ComfyUI for a JPEG instead of the saved PNG (same pixels, about 6x smaller); the PNG stays in its output folder.
                     for quality in JPEG_QUALITIES:
                         view = await client.get("/view", params={
@@ -71,7 +78,7 @@ async def run_workflow(wf: dict) -> tuple[bytes, int]:
                         view.raise_for_status()
                         if len(view.content) <= MAX_IMAGE_BYTES:
                             break
-                    return view.content, quality
+                    return img, view.content, quality
                 if status.get("completed"):
                     raise RuntimeError("Workflow completed without an image output")
             await asyncio.sleep(1)
@@ -83,6 +90,9 @@ async def generate_image(prompt: str, negative: str = "", width: int = 1024, hei
                          steps: int | None = None, seed: int | None = None,
                          checkpoint: str | None = None) -> list:
     """Generate an image from a text prompt with the local ComfyUI FLUX workflow.
+
+    The result is a link to the saved image plus its settings. To show the picture, put the returned `markdown`
+    value in your reply. Do not try to download or decode the image yourself.
 
     Args:
         prompt: What to draw.
@@ -97,18 +107,26 @@ async def generate_image(prompt: str, negative: str = "", width: int = 1024, hei
         seed = random.randint(0, 2**32 - 1)
     wf = build_workflow(prompt, negative, width, height, steps or DEFAULT_STEPS, seed, checkpoint)
     started = time.monotonic()
-    jpeg, quality = await run_workflow(wf)
+    img, jpeg, quality = await run_workflow(wf, INLINE_IMAGE)
     meta = {
         "seed": seed,
         "width": wf[NODE_LATENT]["inputs"]["width"],
         "height": wf[NODE_LATENT]["inputs"]["height"],
         "steps": wf[NODE_SAMPLER]["inputs"]["steps"],
-        "format": "jpeg",
-        "jpeg_quality": quality,
-        "bytes": len(jpeg),
         "elapsed_s": round(time.monotonic() - started, 2),
     }
-    return [Image(data=jpeg, format="jpeg"), json.dumps(meta)]
+    query = urlencode({"filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")})
+    if PUBLIC_URL:
+        url = f"{PUBLIC_URL}/view?{query}"
+        meta["image_url"] = url
+        meta["markdown"] = f"![generated image]({url})"
+    else:
+        meta["image_file"] = img["filename"]
+    result: list = [json.dumps(meta)]
+    if jpeg is not None:
+        meta.update(format="jpeg", jpeg_quality=quality, bytes=len(jpeg))
+        result = [Image(data=jpeg, format="jpeg"), json.dumps(meta)]
+    return result
 
 
 @mcp.tool()

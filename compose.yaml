@@ -39,6 +39,7 @@ volumes:
   alloy_data: {}
   textfile: {}
   vllm_cache: {}
+  caddy_data: {}                           # Caddy's local CA and certificates for the sandbox MCP listener
 
 services:
 
@@ -49,6 +50,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
 
   authelia:
     image: authelia/authelia:4.39.28
@@ -161,6 +163,8 @@ services:
       COMFY_URL: http://comfyui:8188
       COMFY_WORKFLOW: /app/workflows/flux-schnell-api.json
       COMFY_DEFAULT_STEPS: ${COMFY_DEFAULT_STEPS}
+      COMFY_PUBLIC_URL: https://${PUBLIC_HOST}/comfy   # link returned to the agent (browser opens it through Authelia)
+      COMFY_INLINE_IMAGE: "false"                      # true also returns a JPEG inline; OpenClaw turns it into a huge base64 string for the model
       MCP_BIND: 0.0.0.0:9100
     volumes:
       - ./comfyui/workflows:/app/workflows:ro

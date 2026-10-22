@@ -23,7 +23,7 @@ COMFY_IDLE_SECONDS = int(os.environ.get("COMFY_IDLE_MINUTES", "10")) * 60
 DOCKER_URL = os.environ.get("DOCKER_URL", "http://docker-socket-proxy:2375")
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
 ADMIN_GROUP = os.environ.get("ADMIN_GROUP", "admins")
-NEMOCLAW_SANDBOX = os.environ.get("NEMOCLAW_SANDBOX", "my-assistant")
+NEMOCLAW_SANDBOX = os.environ.get("NEMOCLAW_SANDBOX", "nemoclaw-assistant")
 
 MODEL_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 log = logging.getLogger("dashboard")

@@ -1,8 +1,49 @@
 # To verify
 
-Things that were assumed or written from memory and have **not** been tested. Check them as the stack comes up, then tick them off.
+What was tested on the real GB10, what was assumed, and what is still open. Read the two summaries first; the chronological log below them is kept for the details (commands, numbers, dead ends) and **some of its unticked boxes are already resolved by the summary**.
 
-Last updated: 2026-10-21 (after the compose.yaml review)
+Last updated: 2026-10-22, after the stack, NemoClaw and OpenClaw were running end to end.
+
+## Verified on the running stack
+
+- **Core services start and stay healthy** with the pinned tags in `.env.example`: Authelia, LiteLLM + Postgres, model-runner (llama-swap v265 + vLLM 0.29), ComfyUI, comfy-mcp, Caddy, the dashboard, Grafana, Prometheus, Loki, Tempo, Alloy, node-exporter, cAdvisor, gpu-exporter. All Prometheus targets are up (`vllm-agent` only while the model is loaded).
+- **Login path**: Funnel → Caddy → Authelia → dashboard, Grafana (auth-proxy) and LiteLLM UI, with TOTP/passkey and the one-time code read from `/data/notification.txt`. The `ts.net` cookie works.
+- **Public API**: `/llm/v1/chat/completions` through Funnel with a LiteLLM key, including an 86 s streamed completion (5,532 tokens) with nothing cut off.
+- **Model lifecycle**: cold start 332 s (empty caches) → 200 s (caches) → 209 s measured after a reload; `ttl: 0` plus the startup preload keeps it loaded; `--max-model-len 131072` gives a 609,334-token KV cache (4.65× at 131k).
+- **Observability** (throwaway project and later live): OTLP → Alloy → Tempo/Loki/Prometheus, span metrics, container logs through the socket proxy, Grafana datasources healthy, every dashboard query returns data (vLLM names checked against the installed source).
+- **NemoClaw 0.0.137**: installed (HTTP/1.1 workaround), gateway created and managed by NemoClaw, sandbox `nemoclaw-assistant` created with the custom endpoint (`inference.local` smoke test passes), CA baked in by a fresh onboard, MCP registered over `https://172.17.0.1:8443` ("credential resolution verified on the wire, HTTP 200"), OpenClaw config patch applied, browser login with gateway token + device pairing, chat answers through LiteLLM, the agent finds and calls `comfy_image-generate_image`, the result is a short link instead of image bytes.
+- **Caddy MCP listener**: certificate with IP SAN verifies against the exported root; 401 without a key, 200 with the sandbox key, 403 with a key without MCP grant, 404 elsewhere; the public site now sends `/llm/*/mcp` to Authelia.
+- **Docker socket**: Alloy and the dashboard read Docker only through `docker-socket-proxy` (`CONTAINERS`, `INFO`, `NETWORKS`, `POST=0`).
+
+## Findings that shaped the design (all verified the hard way)
+
+- NemoClaw's external-gateway mode is systemd-only on `127.0.0.1`, so the OpenShell gateway is **not** a compose service.
+- `host.openshell.internal` resolves to the **`openshell-docker` network gateway**, not `docker0` → `DOCKER_BRIDGE_IP`.
+- Containers cannot reach the Funnel hostname (Tailscale's listener is bound to `tailscale0`), and managed MCP rejects `host.openshell.internal` → HTTPS listener on `172.17.0.1:8443` with Caddy's CA (`NEMOCLAW_CORPORATE_CA_BUNDLE`, honoured only by a fresh onboard).
+- `trusted-proxy` auth into OpenClaw is impossible: NemoClaw re-adds the token at every container start and OpenClaw refuses both; the attempt made the sandbox container exit and OpenShell mark it `Error` (recovered by editing the config in the stopped container and re-onboarding).
+- OpenClaw hands tool-result images to the model as base64 text: inline images overflow the context, so `comfy-mcp` returns a link. OpenClaw's progressive tool disclosure hides MCP tools, so the agent needs a note in `AGENTS.md`.
+- vLLM's KV-cache sizing breaks if ComfyUI loads FLUX during its start-up (`No available memory for the cache blocks`).
+- GitHub drops HTTP/2 clones from this host; `GIT_CONFIG_*` forcing HTTP/1.1 plus retries works.
+- vLLM FlashAttention fails on `sm_121` only for a tiny test model; the agent model works with the default backend.
+- node-exporter's `cpufreq` collector hangs on the GB10 (disabled).
+
+## Still open
+
+- [ ] **`scripts/nemoclaw-setup.sh` end to end on a clean machine.** Only `ca`, `config --dry-run`, `notes` and syntax were run through the script; `install`, `onboard` and `mcp` repeat commands that ran by hand.
+- [ ] **Reboot behaviour**: the NemoClaw gateway user service and sandbox come back; `${DOCKER_BRIDGE_IP}` exists before LiteLLM/Alloy start (they retry with `restart: unless-stopped`); the model preloads.
+- [ ] **OpenClaw telemetry**: sandbox egress to `host.openshell.internal:4318` (a network policy; presets are empty) and the `diagnostics-otel` plugin. Then check traces in Tempo.
+- [ ] **Does the OpenClaw UI render the markdown image** the agent returns, and does the Authelia cookie apply inside the embedded view? (The link itself opens in a logged-in browser.)
+- [ ] **Real-browser checks** of `/comfy/` (frontend sub-path), the dashboard, sign-out ending the Authelia session, and Funnel's real forwarded headers.
+- [ ] **Real image-understanding quality** of the agent model on screenshots, charts and small text.
+- [ ] **A `users`-group account** reaching `/openclaw` but not `/admin`; the self-service password change with the read-write `users.yml` mount.
+- [ ] **The agent's `AGENTS.md` image note** is not in the repo (it lives in the sandbox workspace); `scripts/nemoclaw-setup.sh notes` re-adds it after a fresh onboard.
+- [ ] Smaller: why weight loading takes about 130 s; ComfyUI's CUDA JIT cache across container re-creation; output-folder growth and root-owned files in `data/comfy-output`; the dashboard's ComfyUI "hot" label is its own flag and does not read the GPU; the MCP policy rejects the session-closing `DELETE` (noise only).
+
+---
+
+# Detailed log (chronological)
+
+Earlier notes, in the order they were written. Where a box is still unticked but the summary above says it was verified, the summary wins.
 
 ---
 
@@ -159,6 +200,18 @@ Read from docs.openclaw.ai and docs.nvidia.com/nemoclaw (latest). Nothing below 
 
 - [x] **Qwen3-VL weights deleted** with `hf cache rm` (freed 62.2 GB; the agent model, 23.5 GB, is intact and `/srv/models/hf/hub` is now 22 GB).
 - [x] **node-exporter network stats:** accepted as is (container-level). Host network metrics are tracked in `TODO.md`.
+
+### OpenClaw / NemoClaw: what happened on the real host
+
+- [x] **Gateway reuse is not possible; NemoClaw manages it.** Installed NemoClaw 0.0.137 (needs `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.version GIT_CONFIG_VALUE_0=HTTP/1.1` here: GitHub drops HTTP/2 clones from this host; `NEMOCLAW_NO_EXPRESS=1` skips the DGX Spark managed-vLLM menu; `--no-gpu` avoids the missing CDI spec).
+- [x] **`host.openshell.internal` is the `openshell-docker` network gateway (172.21.0.1), not docker0.** `DOCKER_BRIDGE_IP` is now 172.21.0.1 so LiteLLM and Alloy are reachable from the sandbox. Check after a reboot and if that Docker network is ever recreated.
+- [x] **The Funnel hostname is unreachable from containers** (Tailscale's listener is bound to the tailscale0 device). Managed MCP therefore uses an HTTPS listener on `172.17.0.1:8443` (Caddy `tls internal`, IP SAN), registered with `--trusted-private-host 172.17.0.1`. The sandbox trusts Caddy's root through `NEMOCLAW_CORPORATE_CA_BUNDLE=data/caddy-root.crt`, which is only honoured by a fresh `nemoclaw onboard --fresh --recreate-sandbox`, not by `rebuild`.
+- [x] **trusted-proxy auth cannot work with NemoClaw 0.0.137.** Its start script re-inserts the gateway token on every container start, and OpenClaw refuses trusted-proxy plus a token; the NemoClaw management commands (`mcp add`, `gateway restart`) also need the token-mode CLI. The sandbox runs in token mode: Authelia gates the URL, and the browser also needs the gateway token (one-time per browser) plus device pairing (the user disabled Control UI device auth by hand).
+- [x] **Image results must not be returned inline to OpenClaw.** The first real image call filled the context (base64 text). `comfy-mcp` now returns a link plus markdown (`COMFY_PUBLIC_URL`); `include_image` is opt-in.
+- [x] **vLLM context raised to 131072** to match OpenClaw's model window (the sandbox said 131072 while vLLM allowed 65536).
+- [ ] The agent's behaviour when the link is clicked in the OpenClaw UI (does it render the markdown image, and does the Authelia cookie apply inside the embedded view?).
+- [ ] OTel egress from the sandbox to `host.openshell.internal:4318` (needs a network policy; presets are currently empty) and the diagnostics-otel plugin.
+- [ ] After a host reboot: the NemoClaw gateway user service, the sandbox, the 172.17.0.1 and 172.21.0.1 binds, and the model preload.
 
 ## Still to review in compose.yaml
 

@@ -1,5 +1,5 @@
 {
-	auto_https off
+	auto_https disable_redirects   # the public site is plain http behind Funnel; only the bridge listener below gets a certificate
 	admin off
 	servers {
 		trusted_proxies static 127.0.0.1/32
@@ -39,18 +39,6 @@ http://:9080 {
 
 	# Model API: machine clients authenticate with LiteLLM virtual keys
 	handle /llm/v1/* {
-		request_header -Remote-User
-		request_header -Remote-Groups
-		request_header -Remote-Email
-		request_header -Remote-Name
-		reverse_proxy 127.0.0.1:4000 {
-			import stream
-		}
-	}
-
-	# MCP gateway (/llm/<server>/mcp): machine clients authenticate with LiteLLM virtual keys, like the model API
-	@mcp path /llm/*/mcp /llm/*/mcp/*
-	handle @mcp {
 		request_header -Remote-User
 		request_header -Remote-Groups
 		request_header -Remote-Email
@@ -104,6 +92,34 @@ http://:9080 {
 
 	handle {
 		redir * /admin/ 302
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# MCP gateway for the OpenClaw sandbox only: HTTPS on the docker0 address (NemoClaw's managed MCP needs HTTPS and
+# rejects host.openshell.internal and the Funnel hostname, which containers cannot reach). Caddy's own CA signs the
+# certificate; the sandbox trusts its root via NEMOCLAW_CORPORATE_CA_BUNDLE. Not published through Funnel.
+https://172.17.0.1:8443 {
+	bind 172.17.0.1
+	tls internal
+
+	@mcp path /llm/*/mcp /llm/*/mcp/*
+	handle @mcp {
+		request_header -Remote-User
+		request_header -Remote-Groups
+		request_header -Remote-Email
+		request_header -Remote-Name
+		reverse_proxy 127.0.0.1:4000 {
+			import stream
+		}
+	}
+
+	handle {
+		respond 404
 	}
 
 	log {

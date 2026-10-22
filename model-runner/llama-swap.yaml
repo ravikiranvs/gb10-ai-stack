@@ -11,7 +11,7 @@ models:
         --host 0.0.0.0 --port 10001
         --served-model-name qwen3.6-35b
         --gpu-memory-utilization 0.30
-        --max-model-len 65536
+        --max-model-len 131072
         --max-num-seqs 4
         --enable-auto-tool-choice
         --tool-call-parser qwen3_coder
@@ -19,4 +19,9 @@ models:
         --otlp-traces-endpoint http://alloy:4317
     proxy: http://127.0.0.1:10001
     checkEndpoint: /health
-    ttl: 1800
+    ttl: 0
+
+hooks:
+  on_startup:
+    preload:
+      - qwen3.6-35b
