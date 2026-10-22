@@ -257,7 +257,16 @@ sequenceDiagram
 | `users` | `/openclaw` only (`two_factor`) |
 | everyone else | **deny** (`default_policy: deny`) |
 
-Session: 12 h expiry, 1 h inactivity; cookie scoped to `PUBLIC_HOST`; the notifier writes to a file in `/data` (no SMTP), so TOTP/WebAuthn enrolment links are read from `notification.txt`. Grafana auto-signs-up proxy users with the **Admin** org role (only `admins` can reach it) and trusts the proxy header only from `172.16.0.0/12` and `127.0.0.1`.
+Session: 12 h expiry, 1 h inactivity; cookie scoped to `PUBLIC_HOST`; the notifier writes to a file in `/data` (no SMTP), so TOTP/WebAuthn enrolment links are read from `notification.txt`. Both TOTP and passkeys are accepted as the second factor (passkeys are second-factor only; `enable_passkey_login` is not set), and `users.yml` is mounted read-write so password changes can be saved. Grafana auto-signs-up proxy users with the **Admin** org role (only `admins` can reach it) and trusts the proxy header only from `172.16.0.0/12` and `127.0.0.1`.
+
+**Recovery (admin, on the server; no email).** If a user loses every second factor, delete them and let the user re-enrol:
+
+```bash
+docker compose exec authelia authelia storage user totp delete <username> --config /config/configuration.yml
+docker compose exec authelia authelia storage user webauthn delete <username> --all --config /config/configuration.yml
+```
+
+The user then signs in with their password and enrols again; the verification link is in `data/notification.txt`. A forgotten password is reset by writing a new argon2 hash into `authelia/users.yml`. Users should enrol two second factors so this stays rare.
 
 ---
 

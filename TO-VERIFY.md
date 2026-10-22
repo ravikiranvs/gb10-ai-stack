@@ -28,7 +28,7 @@ All 13 tags in `.env` were checked to exist with an arm64 build. None were pulle
 
 ## Commands and behaviour written from memory
 
-- [ ] **Credential-reset commands.** Run `authelia storage user --help` and confirm:
+- [x] **Credential-reset commands.** Syntax confirmed with `--help` in `authelia/authelia:4.39.28` (they need the real database to run):
   ```
   docker compose exec authelia authelia storage user totp delete <username> --config /config/configuration.yml
   docker compose exec authelia authelia storage user webauthn delete <username> --all --config /config/configuration.yml
@@ -157,6 +157,9 @@ Read from docs.openclaw.ai and docs.nvidia.com/nemoclaw (latest). Nothing below 
 - [ ] Sandbox egress to `host.openshell.internal:4318` for OTLP (custom policy preset) and the diagnostics-otel plugin install.
 - [ ] The MCP request-body cap (131072 bytes) is on requests only; tool results (JPEG, under 700 KB) are responses.
 
+- [x] **Qwen3-VL weights deleted** with `hf cache rm` (freed 62.2 GB; the agent model, 23.5 GB, is intact and `/srv/models/hf/hub` is now 22 GB).
+- [x] **node-exporter network stats:** accepted as is (container-level). Host network metrics are tracked in `TODO.md`.
+
 ## Still to review in compose.yaml
 
 - [ ] **Host folders.** `/srv/models` does not exist (`/srv` is root-owned). Create `hf/` and `comfy/checkpoints/` and chown them to yourself before starting. The ComfyUI mount hides the image's own `models/` subfolders.
@@ -169,5 +172,5 @@ Read from docs.openclaw.ai and docs.nvidia.com/nemoclaw (latest). Nothing below 
 
 ## Decided, but not yet written into the docs
 
-- [ ] `VARIABLES.md` / `gb10-agent-stack.md`: the read-write `users.yml` mount, the admin-run Authelia recovery steps, `two_factor` kept, passkeys as a second factor only (no `enable_passkey_login`), no SMTP.
+- [x] `VARIABLES.md` / `gb10-agent-stack.md`: the read-write `users.yml` mount, the admin-run Authelia recovery steps, `two_factor` kept, passkeys as a second factor only (no `enable_passkey_login`), no SMTP, and the `secrets/` file modes and optional `hf_token`. Written. The `totp delete` and `webauthn delete` command syntax was checked against `--help` in the pinned Authelia image; the end-to-end recovery flow has not been run.
 - [ ] `VARIABLES.md` `secrets/`: only the `secrets/` directory is `chmod 700` (files are 600, the master key 644); `hf_token` can be left empty.

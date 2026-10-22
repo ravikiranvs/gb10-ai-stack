@@ -80,7 +80,7 @@ Copy from `.env.example`. Docker Compose reads it. It holds no secrets.
 
 ## `secrets/`
 
-One value per file, no trailing newline. Git-ignored, `chmod 700`. `scripts/init-secrets.sh` creates them.
+One value per file, no trailing newline. Git-ignored. The folder is `chmod 700` and the files are mode 600, except `litellm_master_key` and `grafana_admin_password`, which are 644 because Prometheus (user `nobody`) and Grafana (uid 472) read them as Docker secrets; the 700 folder keeps other host users out. `scripts/init-secrets.sh` creates them and never overwrites an existing file.
 
 | Variable (file) | Description | Example value | Required |
 |---|---|---|---|
@@ -91,7 +91,7 @@ One value per file, no trailing newline. Git-ignored, `chmod 700`. `scripts/init
 | `litellm_db_password` | Postgres password for the `litellm` user | `a81d…` (48 hex chars) | Generated |
 | `grafana_admin_password` | Password for Grafana's built-in `admin` account (replaces the default `admin`/`admin`); read via `GF_SECURITY_ADMIN_PASSWORD__FILE`. Day-to-day access is through Authelia, so you rarely need it. Mode 644 so Grafana (uid 472) can read it | `a81d…` (48 hex chars) | Generated |
 | `litellm.env` | Env file for LiteLLM: `LITELLM_MASTER_KEY=…` and `DATABASE_URL=postgresql://litellm:<pw>@litellm-db:5432/litellm` | see description | Generated |
-| `hf_token` | Hugging Face token for model downloads | `hf_AbCdEf…` | **Yes** (you supply it) |
+| `hf_token` | Hugging Face token for model downloads. The file must exist (compose mounts it), but it can be empty: the models in use are not gated | `hf_AbCdEf…` | Optional (you supply it) |
 | `litellm_keys.json` | Virtual keys created by `create-litellm-keys.sh` (`openclaw-sandbox`, `laptop`, `scripts`) | JSON array | Generated after LiteLLM is up |
 
 ---
@@ -108,6 +108,20 @@ Copied from `users.yml.example`; git-ignored. Repeat the block for each user.
 | `password` | Argon2id hash (`docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2`) | `$argon2id$v=19$m=65536,t=3,p=4$…` | Yes |
 | `groups` | `admins` = full access; `users` = `/openclaw` only | `[admins]` | Yes |
 
+`compose.yaml` mounts this file **read-write**, so Authelia can save password changes. Every user needs a second factor (`two_factor` on every protected path): **TOTP** (authenticator app) and **passkeys** (WebAuthn) both work, and passkeys are second-factor only (`enable_passkey_login` is not set). There is no SMTP; Authelia's notifier writes to `/data/notification.txt` instead.
+
+**Recovery when a user loses their devices.** The admin does this on the server; nothing is emailed.
+
+1. Remove the lost second factors:
+   ```bash
+   docker compose exec authelia authelia storage user totp delete <username> --config /config/configuration.yml
+   docker compose exec authelia authelia storage user webauthn delete <username> --all --config /config/configuration.yml
+   ```
+2. The user signs in with their password and enrols a new TOTP app or passkey. The identity-verification link for that is written to `data/notification.txt` (read it on the server and give it to the user).
+3. A forgotten password has no email reset. Generate a new hash (command above) and replace `password` in `users.yml`; Authelia picks up the change. A user who has not lost their devices can change their password in the Authelia UI.
+
+Enrol at least two second factors per user (for example a passkey on each device plus TOTP) to avoid needing this.
+
 ---
 
 ## `authelia/configuration.yml`
@@ -121,6 +135,8 @@ Templated from `PUBLIC_HOST` (`X_AUTHELIA_CONFIG_FILTERS=template`). Nothing to 
 | `session.inactivity` | Idle logout | `1h` | Optional |
 | `regulation.max_retries` / `find_time` / `ban_time` | Brute-force lockout | `3` / `2m` / `30m` | Optional |
 | `webauthn.display_name` | Passkey prompt label | `GB10 AI Stack` | Optional |
+| `access_control.rules[].policy` | `two_factor` on every protected path (decision: keep, with both TOTP and passkeys) | `two_factor` | Optional |
+| `notifier.filesystem.filename` | Where Authelia writes enrolment and reset links (no SMTP) | `/data/notification.txt` | Optional |
 | `access_control.rules[].subject` | Which groups may reach which paths | `group:admins` | Optional |
 
 ---
