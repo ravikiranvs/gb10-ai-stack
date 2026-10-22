@@ -72,6 +72,7 @@
   </div>
 </div>
 
+{% if who.admin %}
 <div class="card">
   <h2>Containers</h2>
   {% if not s.docker_reachable %}<p><span class="dot bad"></span>docker-socket-proxy unreachable</p>{% endif %}
@@ -84,3 +85,4 @@
     {% endfor %}
   </div>
 </div>
+{% endif %}

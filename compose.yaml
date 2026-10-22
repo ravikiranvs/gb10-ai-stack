@@ -303,7 +303,7 @@ services:
       GF_AUTH_PROXY_WHITELIST: "172.16.0.0/12, 127.0.0.1"
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password   # replaces the built-in admin/admin
-      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Admin
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Viewer      # new proxy users; promote admins in Grafana (Administration → Users). Existing users keep their role
       GF_ANALYTICS_REPORTING_ENABLED: "false"
     secrets: [grafana_admin_password]
     volumes:

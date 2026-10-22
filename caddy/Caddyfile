@@ -86,18 +86,19 @@ http://:9080 {
 		reverse_proxy 127.0.0.1:9000
 	}
 
-	# Admin dashboard (prefix stripped after auth; uvicorn --root-path /admin)
-	redir /admin /admin/
-	handle /admin/* {
+	# Dashboard / landing page for everyone (prefix stripped after auth; uvicorn --root-path /home)
+	redir /home /home/
+	redir /admin* /home/ 302     # old address
+	handle /home/* {
 		route {
 			import authelia
-			uri strip_prefix /admin
+			uri strip_prefix /home
 			reverse_proxy 127.0.0.1:9000
 		}
 	}
 
 	handle {
-		redir * /admin/ 302
+		redir * /home/ 302
 	}
 
 	log {

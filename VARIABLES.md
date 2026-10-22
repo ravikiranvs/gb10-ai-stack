@@ -48,7 +48,7 @@ docker compose exec -T authelia sh -c 'cat > /config/users.yml' < edited.yml
 | `<username>` | Login name |
 | `displayname`, `email` | Shown in the UI, passed to Grafana. The e-mail receives reset links |
 | `password` | Argon2id hash: `docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2` |
-| `groups` | `admins`: everything. `users`: `/openclaw` and `/connect` only |
+| `groups` | `admins`: everything. `users`: the dashboard landing page (`/home/`, read-only status), `/openclaw`, `/connect`, LiteLLM UI and Grafana |
 
 Add people with `scripts/add-user.sh <username> <email> [users|admins] [display name]`: it creates the account with a random, never-shown password and rejects duplicates; the person sets their own via **Reset password**. Remove a person by deleting their block from the file and revoking their devices in the dashboard. Every protected path needs a second factor (TOTP and passkeys both work; passkeys are second-factor only). If someone loses all factors:
 

@@ -80,13 +80,13 @@ scripts/nemoclaw-setup.sh notes              # tells the agent to use the image 
 
 **6. Use OpenClaw**
 
-Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first connection from a browser shows "Device pairing required": approve it in the dashboard (`/admin/`, *OpenClaw devices* card). Ask the agent for an image; the first one takes a minute or two while FLUX loads.
+Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first connection from a browser shows "Device pairing required": approve it in the dashboard (`/home/`, *OpenClaw devices* card). Ask the agent for an image; the first one takes a minute or two while FLUX loads.
 
 ## Daily operations
 
 | Task | How |
 |---|---|
-| Add a person | `scripts/add-user.sh <login> <email> [users\|admins]`. They press **Reset password** on the sign-in page, then open `/connect`; you approve their browser. `users` get OpenClaw only; `admins` get everything |
+| Add a person | `scripts/add-user.sh <login> <email> [users\|admins]`. They press **Reset password** on the sign-in page, then open `/connect`; you approve their browser. `users` get the landing page (`/home/`, read-only status), OpenClaw, LiteLLM UI and Grafana (viewer); `admins` also get the dashboard controls, device approval and ComfyUI. A new admin is a Grafana `Viewer` until promoted there |
 | Let a group of people in quickly | Dashboard → *OpenClaw devices* → **Open for 10 min**: new browsers approve themselves and are labelled by who opened `/connect` |
 | Remove a person | Delete their block in `authelia/users.yml` (via `docker compose exec authelia`, see [VARIABLES](VARIABLES.md#users-authelia)) and **Revoke** their devices in the dashboard |
 | Lost second factor | `docker compose exec authelia authelia storage user totp delete <login> --config /config/configuration.yml` (and `webauthn delete <login> --all`); they sign in and enrol again |

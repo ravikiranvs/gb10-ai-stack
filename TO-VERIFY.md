@@ -31,7 +31,7 @@ What was tested on the real GB10 (last updated 2026-10-22), the findings that sh
 
 - [ ] **`scripts/nemoclaw-setup.sh` on a clean machine.** Only `ca`, `config --dry-run`, `notes` ran through the script; `install`, `onboard`, `mcp` repeat commands that ran by hand.
 - [ ] **A second person's full onboarding:** `add-user.sh` → reset link → set password → enrol a second factor → `/connect` → approval → chat. The reset mail is verified; completing the link is not. Also whether an Authelia restart interferes mid-onboarding.
-- [ ] **A `users`-group account** reaches `/openclaw` and `/connect` but not `/admin`; self-service password change with the read-write `users.yml` mount.
+- [ ] **A `users`-group account** in a real browser: lands on the dashboard (no admin cards or buttons), opens OpenClaw via `/connect`, opens LiteLLM UI and Grafana (as Viewer), gets 403 on `/comfy`. (Checked with `Remote-Groups: users` headers against the dashboard: admin-only sections absent, mutating routes 403.) self-service password change with the read-write `users.yml` mount.
 - [ ] **Reboot:** NemoClaw gateway service and sandbox come back, `${DOCKER_BRIDGE_IP}` exists before LiteLLM/Alloy start (they retry via `restart: unless-stopped`), the model preloads.
 - [ ] **Device labels:** confirm a label shows in the paired list after a live approval (field confirmed on real JSON).
 - [ ] **OpenClaw telemetry:** sandbox egress to `host.openshell.internal:4318` and the `diagnostics-otel` plugin (see `TODO.md`).

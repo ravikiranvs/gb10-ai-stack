@@ -9,7 +9,7 @@ flowchart LR
     NET["Internet"] -->|"HTTPS :443"| TS["Tailscale Funnel"]
     TS --> CD["Caddy 127.0.0.1:9080"]
     CD -->|forward_auth| AU["Authelia"]
-    CD --> DB["Dashboard /admin /connect"]
+    CD --> DB["Dashboard /home /connect"]
     CD --> GF["Grafana /grafana"]
     CD --> CU["ComfyUI /comfy"]
     CD --> LL["LiteLLM /llm"]
@@ -42,11 +42,13 @@ Networks: `ai` (apps) and `obs` (telemetry) are internal; compose publishes only
 |---|---|---|
 | `/auth*` | Authelia | anyone |
 | `/llm/v1/*` | LiteLLM | bearer key (Authelia bypassed; `Remote-*` headers stripped) |
-| `/llm*` (UI, MCP) | LiteLLM | admins |
+| `/llm*` (UI, MCP) | LiteLLM (the UI has its own login) | admins, users |
 | `/openclaw*` | sandbox forward `127.0.0.1:18789` (WebSocket) | admins, users |
 | `/connect` | dashboard | admins, users |
-| `/admin/*`, `/grafana*`, `/comfy/*` | dashboard, Grafana (auth-proxy header), ComfyUI | admins |
-| anything else | redirect to `/admin/` | |
+| `/home/*` (landing page) | dashboard | admins, users (the page and its actions are filtered, see §6) |
+| `/grafana*` | Grafana (auth-proxy header) | admins, users |
+| `/comfy/*` | ComfyUI | admins |
+| anything else, and the old `/admin` | redirect to `/home/` | |
 
 Access rules live in `authelia/configuration.yml` (`default_policy: deny`, `two_factor`; session 12 h / 1 h idle; 3 failed logins = 30 min ban). Caddy forces `X-Forwarded-Proto: https` toward Authelia because Funnel traffic arrives as plain HTTP.
 
@@ -55,7 +57,7 @@ Access rules live in `authelia/configuration.yml` (`default_policy: deny`, `two_
 | Client | Mechanism |
 |---|---|
 | Browser | Authelia session (password + TOTP or passkey) checked by Caddy on every UI path |
-| Grafana | Authelia identity headers → Grafana auth-proxy (trusted only from Docker ranges) |
+| Grafana | Authelia identity headers → Grafana auth-proxy (trusted only from Docker ranges). New accounts are `Viewer`; promote admins in Grafana |
 | API clients | LiteLLM virtual key: `laptop` (any model, 30 rpm, $50 / 30 d), `scripts` (`agent`, 10 rpm), `openclaw-sandbox` (60 rpm, the only key with MCP access) |
 | Sandbox → LiteLLM | `openclaw-sandbox` key held in the OpenShell credential store; never inside the sandbox |
 | Dashboard → ops-bridge | Bearer token in `secrets/bridge_dashboard_token` |
@@ -76,7 +78,7 @@ Agent → OpenShell MCP proxy → `https://172.17.0.1:8443/llm/comfy_image/mcp` 
 
 ## 6. Dashboard and ops-bridge
 
-The dashboard (FastAPI + HTMX, behind `/admin`) lists models and services (Docker via the socket proxy, metrics via Prometheus), controls the agent model (llama-swap) and ComfyUI, and runs the *OpenClaw devices* card. Read routes need an Authelia identity; mutating routes need `admins`; `/connect` also admits `users`.
+The dashboard (FastAPI + HTMX, behind `/home`) lists models and services (Docker via the socket proxy, metrics via Prometheus), controls the agent model (llama-swap) and ComfyUI, and runs the *OpenClaw devices* card. The dashboard is the landing page for everyone. `users` see system and model status (read-only), the agent runtime and the app links; `admins` also get the container list, the model/ComfyUI buttons, the *OpenClaw devices* card and the ComfyUI link. Everyone gets links to OpenClaw, LiteLLM and Grafana. The split is enforced in the app, not just hidden: every mutating route returns 403 for `users`, and `/api/status` omits the container list for them.
 
 `ops-bridge` is the only service with the read-write Docker socket. It has no published port, a read-only root, no capabilities and per-client tokens. `actions.yaml` is the complete list of what it can do (kinds `exec`, `restart`, `logs`); parameters are matched against patterns and passed as separate argv elements, never through a shell; every call is audited, and `sensitive` actions log neither parameters nor output. The OpenClaw actions enter the sandbox's nested network namespace as the sandbox user and read the gateway token from `openclaw.json`. To let another service do something, add a client and actions to the file; no code change.
 

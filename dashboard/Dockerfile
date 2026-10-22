@@ -13,4 +13,4 @@ RUN useradd -r -u 10001 app
 USER app
 
 EXPOSE 9000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9000", "--root-path", "/admin", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9000", "--root-path", "/home", "--proxy-headers", "--forwarded-allow-ips", "*"]

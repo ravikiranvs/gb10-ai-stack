@@ -31,16 +31,16 @@ access_control:
       resources:
         - '^/openclaw([/?].*)?$'
         - '^/connect$'
+        - '^/home([/?].*)?$'           # landing page; the dashboard hides and refuses admin-only actions for `users`
+        - '^/grafana([/?].*)?$'        # Grafana role is Viewer for new accounts (compose.yaml)
+        - '^/llm([/?].*)?$'            # LiteLLM UI has its own login
       subject:
         - 'group:admins'
         - 'group:users'
       policy: two_factor
     - domain: '{{ env "PUBLIC_HOST" }}'
       resources:
-        - '^/admin([/?].*)?$'
-        - '^/grafana([/?].*)?$'
         - '^/comfy([/?].*)?$'
-        - '^/llm([/?].*)?$'
       subject: 'group:admins'
       policy: two_factor
 
@@ -50,7 +50,7 @@ session:
   cookies:
     - domain: '{{ env "PUBLIC_HOST" }}'
       authelia_url: 'https://{{ env "PUBLIC_HOST" }}/auth'
-      default_redirection_url: 'https://{{ env "PUBLIC_HOST" }}/admin/'
+      default_redirection_url: 'https://{{ env "PUBLIC_HOST" }}/home/'
 
 regulation:
   max_retries: 3

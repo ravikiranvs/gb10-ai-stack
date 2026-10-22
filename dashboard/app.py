@@ -234,8 +234,11 @@ async def status_partial(request: Request):
 
 @app.get("/api/status")
 async def api_status(request: Request):
-    identity(request)
-    return JSONResponse(await collect_status())
+    who = identity(request)
+    status = await collect_status()
+    if not who["admin"]:
+        status.pop("services", None)   # container names and states are for admins
+    return JSONResponse(status)
 
 
 @app.post("/api/models/{model_id}/up", response_class=HTMLResponse)

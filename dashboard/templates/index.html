@@ -54,10 +54,10 @@
     {% endif %}
     <div class="card links">
       <h2>Apps</h2>
-      <a href="/openclaw/">OpenClaw</a>
+      <a href="/connect">OpenClaw</a>
       <a href="/llm/ui/">LiteLLM</a>
       <a href="/grafana/">Grafana</a>
-      <a href="/comfy/">ComfyUI</a>
+      {% if who.admin %}<a href="/comfy/">ComfyUI</a>{% endif %}
     </div>
   </main>
 </body>
