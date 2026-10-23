@@ -56,6 +56,8 @@ chmod 644 "$SECRETS/litellm_master_key"
 chmod 644 "$SECRETS/grafana_admin_password"
 # the dashboard container runs as a non-root user and reads its ops-bridge secret
 chmod 644 "$SECRETS/bridge_dashboard_token"
+# Grafana (uid 472) reads its OIDC client secret from this file
+chmod 644 "$SECRETS/grafana_oidc_secret"
 
 if [[ ! -s "$SECRETS/hf_token" ]]; then
   read -r -s -p "Hugging Face token (leave empty to fill in later): " HF
