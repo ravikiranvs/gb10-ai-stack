@@ -34,6 +34,7 @@ Created by `scripts/init-secrets.sh`, never overwritten; one value per file with
 | `authelia_smtp_password` | SMTP password / API key. Empty unless SMTP is on. `read -rs k && printf '%s' "$k" > secrets/authelia_smtp_password` |
 | `authelia_oidc_hmac`, `authelia_oidc_jwks_key` | Authelia OpenID Connect provider: HMAC secret and RSA signing key (generated) |
 | `portainer_oidc_secret`, `portainer_oidc_client_hash` | Portainer's OIDC client secret (plain, used by `scripts/portainer-setup.sh`) and its PBKDF2 hash (in the Authelia config) (generated) |
+| `grafana_oidc_secret`, `litellm_oidc_secret`, `*_oidc_client_hash` | OIDC client secrets for Grafana and LiteLLM and the PBKDF2 hashes Authelia holds for all three clients (generated; the LiteLLM secret is also appended to `litellm.env` as `GENERIC_CLIENT_SECRET`) |
 | `portainer_admin_password` | Portainer's break-glass `admin` account (generated); day-to-day login is Authelia |
 | `hf_token` | Hugging Face token; may be empty (models are not gated) |
 | `litellm_keys.json` | Virtual keys from `scripts/create-litellm-keys.sh` (`openclaw-sandbox`, `laptop`, `scripts`) |
@@ -52,7 +53,7 @@ docker compose exec -T authelia sh -c 'cat > /config/users.yml' < edited.yml
 | `<username>` | Login name |
 | `displayname`, `email` | Shown in the UI, passed to Grafana. The e-mail receives reset links |
 | `password` | Argon2id hash: `docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2` |
-| `groups` | `admins`: everything. `users`: the dashboard landing page (`/home/`, read-only status), `/openclaw`, `/connect`, LiteLLM UI and Grafana |
+| `groups` | `admins`: everything. `users`: the dashboard landing page (`/home/`, read-only status), `/openclaw`, `/connect`, Grafana (Viewer) and Portainer (own containers). `litellm`: LiteLLM UI SSO, in addition to `users` or `admins`; keep it to 5 people (LiteLLM's free SSO limit) |
 
 Add people with `scripts/add-user.sh <username> <email> [users|admins] [display name]`: it creates the account with a random, never-shown password and rejects duplicates; the person sets their own via **Reset password**. Remove a person by deleting their block from the file and revoking their devices in the dashboard. Every protected path needs a second factor (TOTP and passkeys both work; passkeys are second-factor only). If someone loses all factors:
 

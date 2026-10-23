@@ -37,13 +37,18 @@ if [[ ! -s "$SECRETS/authelia_oidc_jwks_key" ]]; then
 else
   echo "keep     secrets/authelia_oidc_jwks_key"
 fi
-if [[ ! -s "$SECRETS/portainer_oidc_client_hash" ]]; then
-  docker run --rm authelia/authelia:4.39.28 authelia crypto hash generate pbkdf2 --password "$(cat "$SECRETS/portainer_oidc_secret")" --no-confirm \
-    | sed -n 's/^Digest: //p' | tr -d '\n' > "$SECRETS/portainer_oidc_client_hash"
-  echo "created  secrets/portainer_oidc_client_hash"
-else
-  echo "keep     secrets/portainer_oidc_client_hash"
-fi
+gen grafana_oidc_secret    "$(rand 32)"
+gen litellm_oidc_secret    "$(rand 32)"
+# Authelia stores only a PBKDF2 hash of each OIDC client secret
+for client in portainer grafana litellm; do
+  if [[ ! -s "$SECRETS/${client}_oidc_client_hash" ]]; then
+    docker run --rm authelia/authelia:4.39.28 authelia crypto hash generate pbkdf2 --password "$(cat "$SECRETS/${client}_oidc_secret")" --no-confirm \
+      | sed -n 's/^Digest: //p' | tr -d '\n' > "$SECRETS/${client}_oidc_client_hash"
+    echo "created  secrets/${client}_oidc_client_hash"
+  else
+    echo "keep     secrets/${client}_oidc_client_hash"
+  fi
+done
 
 # Prometheus runs as nobody and reads this file to scrape LiteLLM /llm/metrics
 chmod 644 "$SECRETS/litellm_master_key"
@@ -66,6 +71,8 @@ if [[ ! -s "$SECRETS/litellm.env" ]]; then
   } > "$SECRETS/litellm.env"
   echo "created  secrets/litellm.env"
 fi
+
+grep -q '^GENERIC_CLIENT_SECRET=' "$SECRETS/litellm.env" || { echo "GENERIC_CLIENT_SECRET=$(cat "$SECRETS/litellm_oidc_secret")" >> "$SECRETS/litellm.env"; echo "updated  secrets/litellm.env (OIDC client secret)"; }
 
 [[ -f "$ROOT/.env" ]] || { cp "$ROOT/.env.example" "$ROOT/.env"; echo "created  .env (edit it)"; }
 [[ -f "$ROOT/authelia/users.yml" ]] || {

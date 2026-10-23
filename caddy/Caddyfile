@@ -62,9 +62,8 @@ http://:9080 {
 		}
 	}
 
-	# Grafana (serve_from_sub_path)
+	# Grafana (serve_from_sub_path); signs in through Authelia OIDC, so no forward_auth here
 	handle /grafana* {
-		import authelia
 		reverse_proxy 127.0.0.1:3000
 	}
 

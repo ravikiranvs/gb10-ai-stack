@@ -28,6 +28,8 @@ mcp_servers:
     description: Local image generation via ComfyUI
 
 litellm_settings:
+  default_internal_user_params:
+    user_role: internal_user_viewer     # SSO sign-ins start as viewers; promote admins in the UI
   callbacks: ["prometheus", "otel"]
   request_timeout: 900
   drop_params: true

@@ -38,6 +38,12 @@ secrets:
     file: ./secrets/authelia_oidc_jwks_key
   portainer_oidc_client_hash:
     file: ./secrets/portainer_oidc_client_hash
+  grafana_oidc_client_hash:
+    file: ./secrets/grafana_oidc_client_hash
+  litellm_oidc_client_hash:
+    file: ./secrets/litellm_oidc_client_hash
+  grafana_oidc_secret:
+    file: ./secrets/grafana_oidc_secret
   portainer_admin_password:
     file: ./secrets/portainer_admin_password
 
@@ -83,7 +89,7 @@ services:
       AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage_key
       AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE: /run/secrets/authelia_oidc_hmac
       TZ: ${TZ}
-    secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password, authelia_oidc_hmac, authelia_oidc_jwks_key, portainer_oidc_client_hash]
+    secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password, authelia_oidc_hmac, authelia_oidc_jwks_key, portainer_oidc_client_hash, grafana_oidc_client_hash, litellm_oidc_client_hash]
     volumes:
       - ./authelia:/config:ro
       - ./authelia/users.yml:/config/users.yml   # read-write so password resets/changes in the UI can be saved
@@ -121,6 +127,17 @@ services:
       OTEL_EXPORTER: otlp_http
       OTEL_ENDPOINT: http://alloy:4318
       OTEL_SERVICE_NAME: litellm
+      # SSO: Authelia OIDC (client `litellm`; its secret is GENERIC_CLIENT_SECRET in secrets/litellm.env). Free for 5 users, so Authelia only
+      # lets the `litellm` group in. Token/userinfo calls use the docker0 listener in the Caddyfile.
+      PROXY_BASE_URL: https://${PUBLIC_HOST}/llm
+      GENERIC_CLIENT_ID: litellm
+      GENERIC_AUTHORIZATION_ENDPOINT: https://${PUBLIC_HOST}/auth/api/oidc/authorization
+      GENERIC_TOKEN_ENDPOINT: http://172.17.0.1:9081/auth/api/oidc/token
+      GENERIC_USERINFO_ENDPOINT: http://172.17.0.1:9081/auth/api/oidc/userinfo
+      GENERIC_SCOPE: openid profile email groups
+      GENERIC_USER_ID_ATTRIBUTE: sub                # stable; preferred_username could change and create a second account
+      GENERIC_USER_EMAIL_ATTRIBUTE: email
+      GENERIC_USER_DISPLAY_NAME_ATTRIBUTE: name
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     depends_on:
@@ -324,17 +341,26 @@ services:
     environment:
       GF_SERVER_ROOT_URL: https://${PUBLIC_HOST}/grafana/
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_AUTH_PROXY_ENABLED: "true"
-      GF_AUTH_PROXY_HEADER_NAME: Remote-User
-      GF_AUTH_PROXY_HEADER_PROPERTY: username
-      GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
-      GF_AUTH_PROXY_HEADERS: "Email:Remote-Email Name:Remote-Name Groups:Remote-Groups"
-      GF_AUTH_PROXY_WHITELIST: "172.16.0.0/12, 127.0.0.1"
-      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      # SSO: Authelia OIDC (client `grafana`). Role comes from the `groups` claim: admins → Admin, everyone else → Viewer.
+      # Token/userinfo calls use the docker0 listener in the Caddyfile (containers cannot reach the public hostname).
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: Authelia
+      GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN: "true"                  # break-glass form: /grafana/login?disableAutoLogin=true (built-in admin)
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: grafana
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET__FILE: /run/secrets/grafana_oidc_secret
+      GF_AUTH_GENERIC_OAUTH_SCOPES: openid profile email groups
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: https://${PUBLIC_HOST}/auth/api/oidc/authorization
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://172.17.0.1:9081/auth/api/oidc/token
+      GF_AUTH_GENERIC_OAUTH_API_URL: http://172.17.0.1:9081/auth/api/oidc/userinfo
+      GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH: preferred_username
+      GF_AUTH_GENERIC_OAUTH_NAME_ATTRIBUTE_PATH: name
+      GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH: email
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(groups[*], 'admins') && 'Admin' || 'Viewer'"
+      GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP: "true"
+      GF_AUTH_SIGNOUT_REDIRECT_URL: https://${PUBLIC_HOST}/auth/logout
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password   # replaces the built-in admin/admin
-      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Viewer      # new proxy users; promote admins in Grafana (Administration → Users). Existing users keep their role
       GF_ANALYTICS_REPORTING_ENABLED: "false"
-    secrets: [grafana_admin_password]
+    secrets: [grafana_admin_password, grafana_oidc_secret]
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro

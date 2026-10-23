@@ -32,11 +32,16 @@ access_control:
         - '^/openclaw([/?].*)?$'
         - '^/connect$'
         - '^/home([/?].*)?$'           # landing page; the dashboard hides and refuses admin-only actions for `users`
-        - '^/grafana([/?].*)?$'        # Grafana role is Viewer for new accounts (compose.yaml)
-        - '^/llm([/?].*)?$'            # LiteLLM UI has its own login
       subject:
         - 'group:admins'
         - 'group:users'
+      policy: two_factor
+    - domain: '{{ env "PUBLIC_HOST" }}'
+      resources:
+        - '^/llm([/?].*)?$'            # LiteLLM UI: Authelia first, then LiteLLM's own SSO (OIDC client `litellm`, same group)
+      subject:
+        - 'group:admins'
+        - 'group:litellm'
       policy: two_factor
     - domain: '{{ env "PUBLIC_HOST" }}'
       resources:
@@ -53,7 +58,7 @@ identity_providers:
         use: 'sig'
         key: {{ secret "/run/secrets/authelia_oidc_jwks_key" | mindent 10 "|" | msquote }}
     claims_policies:
-      portainer:
+      portainer:                     # shared by all clients: adds groups, e-mail and name to the ID token
         id_token: ['groups', 'email', 'email_verified', 'preferred_username', 'name']
     authorization_policies:
       portainer:
@@ -63,6 +68,18 @@ identity_providers:
             subject:
               - 'group:admins'
               - 'group:users'
+      grafana:
+        default_policy: deny
+        rules:
+          - policy: two_factor
+            subject:
+              - 'group:admins'
+              - 'group:users'
+      litellm:                       # LiteLLM's SSO is free for 5 users: only members of the `litellm` group can sign in
+        default_policy: deny
+        rules:
+          - policy: two_factor
+            subject: 'group:litellm'
     clients:
       - client_id: portainer
         client_name: Portainer
@@ -72,6 +89,33 @@ identity_providers:
         claims_policy: portainer
         redirect_uris:
           - 'https://{{ env "PUBLIC_HOST" }}/portainer/'
+        scopes: ['openid', 'profile', 'email', 'groups']
+        response_types: ['code']
+        grant_types: ['authorization_code']
+        token_endpoint_auth_method: client_secret_post
+        consent_mode: implicit
+      - client_id: grafana
+        client_name: Grafana
+        client_secret: {{ secret "/run/secrets/grafana_oidc_client_hash" | trim | msquote }}
+        public: false
+        authorization_policy: grafana
+        claims_policy: portainer
+        consent_mode: implicit
+        redirect_uris:
+          - 'https://{{ env "PUBLIC_HOST" }}/grafana/login/generic_oauth'
+        scopes: ['openid', 'profile', 'email', 'groups']
+        response_types: ['code']
+        grant_types: ['authorization_code']
+        token_endpoint_auth_method: client_secret_basic
+      - client_id: litellm
+        client_name: LiteLLM
+        client_secret: {{ secret "/run/secrets/litellm_oidc_client_hash" | trim | msquote }}
+        public: false
+        authorization_policy: litellm
+        claims_policy: portainer
+        consent_mode: implicit
+        redirect_uris:
+          - 'https://{{ env "PUBLIC_HOST" }}/llm/sso/callback'
         scopes: ['openid', 'profile', 'email', 'groups']
         response_types: ['code']
         grant_types: ['authorization_code']
