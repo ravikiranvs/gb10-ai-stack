@@ -126,7 +126,7 @@ services:
     env_file: ./secrets/litellm.env        # LITELLM_MASTER_KEY, DATABASE_URL (created by scripts/init-secrets.sh)
     environment:
       SERVER_ROOT_PATH: /llm
-      UI_LOGO_PATH: /app/branding/logo.png
+      UI_LOGO_PATH: https://${PUBLIC_HOST}/brand/logo.png   # served by Caddy's /brand route
       LITELLM_FAVICON_URL: /app/branding/favicon.ico
       OTEL_EXPORTER: otlp_http
       OTEL_ENDPOINT: http://alloy:4318
@@ -369,6 +369,10 @@ services:
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # Branding: OSS Grafana has no white-labelling setting, so replace its bundled icons (menu logo, favicon, touch icon)
+      - ./branding/grafana/grafana_icon.svg:/usr/share/grafana/public/img/grafana_icon.svg:ro
+      - ./branding/grafana/fav32.png:/usr/share/grafana/public/img/fav32.png:ro
+      - ./branding/grafana/apple-touch-icon.png:/usr/share/grafana/public/img/apple-touch-icon.png:ro
       - grafana_data:/var/lib/grafana
 
   node-exporter:

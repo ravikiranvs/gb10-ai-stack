@@ -86,6 +86,14 @@ http://:9080 {
 		file_server
 	}
 
+	# LiteLLM's UI asks for /get_favicon and /favicon.ico without its /llm prefix (and Portainer asks for /favicon.ico), so serve ours at the root
+	@icon path /favicon.ico /get_favicon
+	handle @icon {
+		rewrite * /favicon.ico
+		root * /srv/branding
+		file_server
+	}
+
 	# Portainer (prefix stripped; Authelia is its OIDC provider, so no forward_auth here)
 	redir /portainer /portainer/
 	handle /portainer/* {

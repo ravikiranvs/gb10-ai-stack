@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate branding/logo.png and branding/favicon.ico (needs Pillow and DejaVu Sans Bold).
+"""Regenerate branding/logo.png, branding/favicon.ico and the Grafana icon PNGs (needs Pillow and DejaVu Sans Bold).
 
 Palette matches the dashboard: accent #60a5fa fading to #a78bfa, dark navy #0b1020 lettering.
 branding/logo.svg is hand-written and mirrors the same design; keep the two in step.
@@ -31,4 +31,6 @@ def badge(w, h, text, size):
 
 
 badge(400, 140, "GB10", 88).save(OUT / "logo.png")
+badge(32, 32, "GB10", 10).save(OUT / "grafana" / "fav32.png")
+badge(180, 180, "GB10", 57).save(OUT / "grafana" / "apple-touch-icon.png")
 badge(256, 256, "GB10", 82).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
