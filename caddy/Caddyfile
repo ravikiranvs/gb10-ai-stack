@@ -79,6 +79,13 @@ http://:9080 {
 		}
 	}
 
+	# Brand assets: public so Portainer's custom-logo URL (fetched by the browser) and the login pages can load them
+	handle /brand/* {
+		uri strip_prefix /brand
+		root * /srv/branding
+		file_server
+	}
+
 	# Portainer (prefix stripped; Authelia is its OIDC provider, so no forward_auth here)
 	redir /portainer /portainer/
 	handle /portainer/* {

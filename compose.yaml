@@ -71,6 +71,7 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST}          # for the OIDC token listener's X-Forwarded-Host
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./branding:/srv/branding:ro
       - caddy_data:/data
 
   authelia:
@@ -92,6 +93,7 @@ services:
     secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password, authelia_oidc_hmac, authelia_oidc_jwks_key, portainer_oidc_client_hash, grafana_oidc_client_hash, litellm_oidc_client_hash]
     volumes:
       - ./authelia:/config:ro
+      - ./branding:/branding:ro
       - ./authelia/users.yml:/config/users.yml   # read-write so password resets/changes in the UI can be saved
       - authelia_data:/data
 
@@ -124,6 +126,8 @@ services:
     env_file: ./secrets/litellm.env        # LITELLM_MASTER_KEY, DATABASE_URL (created by scripts/init-secrets.sh)
     environment:
       SERVER_ROOT_PATH: /llm
+      UI_LOGO_PATH: /app/branding/logo.png
+      LITELLM_FAVICON_URL: /app/branding/favicon.ico
       OTEL_EXPORTER: otlp_http
       OTEL_ENDPOINT: http://alloy:4318
       OTEL_SERVICE_NAME: litellm
@@ -140,6 +144,7 @@ services:
       GENERIC_USER_DISPLAY_NAME_ATTRIBUTE: name
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
+      - ./branding:/app/branding:ro
     depends_on:
       litellm-db:
         condition: service_healthy

@@ -1,6 +1,7 @@
 # Rendered with X_AUTHELIA_CONFIG_FILTERS=template; PUBLIC_HOST comes from .env
 server:
   address: 'tcp://0.0.0.0:9091/auth'
+  asset_path: /branding                # logo.png and favicon.ico (see branding/)
 
 log:
   level: info
