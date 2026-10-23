@@ -99,8 +99,12 @@ Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (l
 | `admins` / `users` groups | `users.yml`, `authelia/configuration.yml`, `compose.yaml` (`ADMIN_GROUP`, `USER_GROUP`) |
 | `/connect` | Caddyfile route, Authelia rule, `dashboard/app.py` |
 | `bridge_dashboard_token` | `actions.yaml` `clients.dashboard.token_file`, ops-bridge and dashboard secrets |
-| Host ports 9091, 4000, 3000, 8188, 9000, 9080, 18789 | `compose.yaml` and Caddyfile (`18789` is the sandbox forward NemoClaw creates) |
+| Host ports 9091, 4000, 3000, 8188, 9000, 9010, 9080, 18789 | `compose.yaml` and Caddyfile (`18789` is the sandbox forward NemoClaw creates) |
 | `DOCKER_BRIDGE_IP` | `.env` = `openshell-docker` gateway = `host.openshell.internal` inside the sandbox |
+| OIDC clients `portainer`, `grafana`, `litellm` | `authelia/configuration.yml` (client ids, redirect URIs, `token_endpoint_auth_method`), `compose.yaml` (Grafana and LiteLLM env), `scripts/portainer-setup.sh`. Redirects: `/portainer/`, `/grafana/login/generic_oauth`, `/llm/sso/callback` |
+| OIDC token listener `172.17.0.1:9081` | Caddyfile, `compose.yaml` (Grafana, LiteLLM), `scripts/portainer-setup.sh` |
+| `--max-model-len` = OpenClaw context window | `llama-swap.yaml`, `scripts/nemoclaw-setup.sh` (`NEMOCLAW_CONTEXT_WINDOW`), and the live `contextWindow` in the sandbox's `openclaw.json` (`openclaw config patch`; the onboard value only applies to a fresh onboard) |
+| `litellm` group | `users.yml`, the `litellm` OIDC authorization policy and the `/llm` rule in `authelia/configuration.yml`; at most 5 members (LiteLLM's free SSO limit) |
 | MCP listener `172.17.0.1:8443` | Caddyfile, `nemoclaw-setup.sh` (`MCP_URL`, `--trusted-private-host`) |
 | Caddy root CA | `caddy_data` volume → `data/caddy-root.crt` → baked into the sandbox at onboard |
 | Checkpoint filename | workflow JSON and the file in `${MODELS_DIR}/comfy/checkpoints/` |

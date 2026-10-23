@@ -5,8 +5,8 @@ A self-hosted AI agent stack for one NVIDIA GB10 (DGX Spark class, arm64, Ubuntu
 - **Agent model:** Qwen3.6-35B-A3B (NVFP4) on vLLM, behind llama-swap and LiteLLM (OpenAI API, virtual keys, MCP gateway).
 - **Images:** FLUX schnell on ComfyUI, exposed to the agent as an MCP tool.
 - **Agent:** OpenClaw in a NemoClaw/OpenShell sandbox.
-- **Access:** one public HTTPS port (Tailscale Funnel) → Caddy → Authelia (password + TOTP/passkey).
-- **Ops:** admin dashboard, Grafana/Prometheus/Loki/Tempo, `ops-bridge` for allow-listed container actions.
+- **Access:** one public HTTPS port (Tailscale Funnel) → Caddy → Authelia (password + TOTP/passkey), which is also the single sign-on provider for Portainer, Grafana and LiteLLM.
+- **Ops:** admin dashboard, Portainer (containers for admins; private containers for users), Grafana/Prometheus/Loki/Tempo, `ops-bridge` for allow-listed container actions.
 
 | Doc | Read it for |
 |---|---|
@@ -126,6 +126,10 @@ Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first conn
 | Agent draws SVG instead of calling the image tool | `scripts/nemoclaw-setup.sh notes` |
 | `mcp` says "non-prefix partial state" | `nemoclaw <sandbox> mcp remove comfy_image`, delete the leftover provider (`openshell provider list` / `delete`), rerun |
 | No reset e-mail | `docker compose logs authelia`, then the SMTP service's log; see the same-domain note above |
+| Grafana / LiteLLM / Portainer sign-in fails with `invalid_client` | `docker compose logs authelia` names the mismatch: the client secret (`secrets/*_oidc_secret` must be readable by the app) or `token_endpoint_auth_method`. After editing `authelia/configuration.yml`, `docker compose restart authelia` |
+| Portainer: "No valid Portainer License found" | Non-admins cannot sign in until the license is entered (see step 6) |
+| LiteLLM UI refuses a signed-in `users` account | Only `admins` and the `litellm` group (5 seats) may use it: `add-user.sh <login> <email> users,litellm` for new accounts |
+| Edited `llama-swap.yaml` (or `Caddyfile`) but nothing changed | Single-file bind mounts keep the old file when an editor or `sed -i` replaces it: `docker compose up -d --force-recreate model-runner`, or `docker compose restart caddy` (Caddy's admin API is off) |
 | `vLLM: No available memory for the cache blocks` | ComfyUI loaded FLUX during start-up: free it (dashboard → *Free*) and restart `model-runner` |
 
 ## Layout
