@@ -79,6 +79,7 @@ cmd_onboard() {
   export NEMOCLAW_SANDBOX_GPU=0
   export NEMOCLAW_INFERENCE_INPUTS=text,image   # build-time: the agent model accepts images
   export NEMOCLAW_REASONING=true                # build-time
+  export NEMOCLAW_CONTEXT_WINDOW=262144         # build-time: keep equal to --max-model-len in model-runner/llama-swap.yaml
   export NEMOCLAW_TRUSTED_PRIVATE_HOSTS=host.openshell.internal
   export NEMOCLAW_DISABLE_TELEMETRY=1
   export NEMOCLAW_CORPORATE_CA_BUNDLE="$CA_FILE"  # build-time: only a fresh onboard applies it; `rebuild` ignores it

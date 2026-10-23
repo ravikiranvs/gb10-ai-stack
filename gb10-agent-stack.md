@@ -66,7 +66,7 @@ Access rules live in `authelia/configuration.yml` (`default_policy: deny`, `two_
 
 ## 4. Models and memory
 
-- Agent model: `--gpu-memory-utilization 0.30` (~36 GB), `--max-model-len 131072` (about 609k tokens of KV cache), 4 concurrent sequences. Multimodal, so there is no separate vision model.
+- Agent model: `--gpu-memory-utilization 0.30` (~36 GB), `--max-model-len 262144` (was 609k tokens of KV cache at 131072; re-check after restart), 4 concurrent sequences. Multimodal, so there is no separate vision model.
 - ComfyUI loads FLUX on demand (~20 to 25 GB) and the dashboard frees it after `COMFY_IDLE_MINUTES` (10).
 - Budget: keep Σ(`gpu-memory-utilization` × 121 GB) + ComfyUI peak + 20 GB under ~115 GB.
 - Cold start of the agent: ~330 s with empty caches, ~200 s afterwards (compile and CUDA JIT caches are on the `vllm_cache` volume).

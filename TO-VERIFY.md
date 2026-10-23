@@ -7,7 +7,7 @@ What was tested on the real GB10 (last updated 2026-10-22), the findings that sh
 - **Services:** all 18 compose services start healthy on the pinned tags; all Prometheus targets are up (`vllm-agent` only while the model is loaded).
 - **Login:** Funnel → Caddy → Authelia → dashboard, Grafana (auth-proxy), LiteLLM UI, with TOTP/passkey; `ts.net` cookie works. Forged `Remote-*` headers have no effect; WebSocket through `/openclaw` works.
 - **Public API:** `/llm/v1/chat/completions` through Funnel with a virtual key, including an 86 s streamed completion with nothing cut off.
-- **Model:** cold start 332 s (empty caches), about 200 s afterwards; `ttl: 0` plus preload keeps it loaded; 131072 context, 609k-token KV cache.
+- **Model:** cold start 332 s (empty caches), about 200 s afterwards; `ttl: 0` plus preload keeps it loaded; 262144 context configured (was 131072, 609k-token KV cache; re-check KV capacity after restart).
 - **Observability:** OTLP → Alloy → Tempo/Loki/Prometheus; Grafana datasources healthy; every dashboard query returns data.
 - **NemoClaw 0.0.137 / OpenClaw 2026.9.2:** install (HTTP/1.1 workaround), onboard with the custom endpoint, CA baked in, MCP over `https://172.17.0.1:8443` (401 without key, 200 sandbox key, 403 key without MCP grant, 404 elsewhere), config patch, browser login with token + pairing, chat through LiteLLM, image generation end to end (agent calls the tool, markdown picture shows).
 - **ops-bridge + dashboard Devices card:** 401/403/409/422/504 paths, audit log hides sensitive output; list, approve, reject, revoke (+remove), enrollment window, and `/connect` exercised in real browsers.
