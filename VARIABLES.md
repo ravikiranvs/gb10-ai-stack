@@ -66,8 +66,8 @@ docker compose exec authelia authelia storage user webauthn delete <username> --
 
 | File | What to change |
 |---|---|
-| `authelia/configuration.yml` | Templated from `.env`. Session lengths, lockout, access rules (`group:admins` / `group:users` per path). Notifier switches on `SMTP_ADDRESS` |
-| `caddy/Caddyfile` | Routes. Listeners `127.0.0.1:9080` (Funnel target) and `https://172.17.0.1:8443` (sandbox MCP; must equal `MCP_URL` in `nemoclaw-setup.sh`); upstream ports must match `compose.yaml` |
+| `authelia/configuration.yml` | Templated from `.env`. Session lengths, lockout, access rules (`group:admins` / `group:users` per path; `/llm` is `admins` + `litellm`), the OIDC clients (`portainer`, `grafana`, `litellm`) and their authorization policies. Notifier switches on `SMTP_ADDRESS` |
+| `caddy/Caddyfile` | Routes. Listeners `127.0.0.1:9080` (Funnel target), `https://172.17.0.1:8443` (sandbox MCP; must equal `MCP_URL` in `nemoclaw-setup.sh`) and `http://172.17.0.1:9081` (OIDC token/userinfo for Grafana, LiteLLM, Portainer); upstream ports must match `compose.yaml` |
 | `litellm/config.yaml` | Model names (`agent`, `qwen3.6-35b`), the `comfy_image` MCP server, 900 s timeouts (must exceed a vLLM cold start), `trusted_proxy_ranges` (Docker address pools) |
 | `model-runner/llama-swap.yaml` | The vLLM command: model ID, `--served-model-name` (matches LiteLLM and Prometheus), fixed port `10001`, `--gpu-memory-utilization 0.30`, `--max-model-len 262144` (keep equal to OpenClaw's context window), `--tool-call-parser qwen3_coder` (wrong value = empty `tool_calls`), `ttl: 0` + `preload` (always loaded). Hot-reloads and restarts vLLM: 3 to 4 minutes |
 | `comfyui/workflows/flux-schnell-api.json` | `ckpt_name` must exist in `${MODELS_DIR}/comfy/checkpoints/`. `comfy-mcp` and the dashboard warm-up address nodes `1`–`7` by ID |
