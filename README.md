@@ -95,7 +95,7 @@ Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first conn
 | Add a person | `scripts/add-user.sh <login> <email> [users\|admins]`. They press **Reset password** on the sign-in page, then open `/connect`; you approve their browser. `users` get the landing page (`/home/`, read-only status), OpenClaw, LiteLLM UI and Grafana (viewer); `admins` also get the dashboard controls, device approval and ComfyUI. A new admin is a Grafana `Viewer` until promoted there |
 | Let a group of people in quickly | Dashboard → *OpenClaw devices* → **Open for 10 min**: new browsers approve themselves and are labelled by who opened `/connect` |
 | Remove a person | Delete their block in `authelia/users.yml` (via `docker compose exec authelia`, see [VARIABLES](VARIABLES.md#users-authelia)) and **Revoke** their devices in the dashboard |
-| Portainer | `admins` see and manage everything. `users` can create, run and delete their own containers (private to them by default; they can choose to share with the `users` team) but cannot see or change anyone else's or the stack's, and cannot use bind mounts, privileged mode, host namespaces, device mappings, extra capabilities or stacks. GPU containers (`--gpus`) are allowed; published ports and resource use are not limited. Break-glass: `scripts/portainer-setup.sh local`, then sign in as `admin` |
+| Portainer | `admins` see and manage everything. `users` can create, run and delete their own containers (private to them by default; they can choose to share with the `users` team) but cannot see or change anyone else's or the stack's, and cannot use bind mounts, privileged mode, host namespaces, device mappings, extra capabilities or stacks. GPU containers (`--gpus`) are allowed; published ports and resource use are not limited. **Known gap, accepted:** Portainer cannot stop a user's container from using host networking or joining `ai-stack_ai`; from there it can reach services that trust Authelia's `Remote-*` headers (the dashboard, Grafana), so a `users` account that is willing to can act as an admin. Treat `users` as trusted. Break-glass: `scripts/portainer-setup.sh local`, then sign in as `admin` |
 | Lost second factor | `docker compose exec authelia authelia storage user totp delete <login> --config /config/configuration.yml` (and `webauthn delete <login> --all`); they sign in and enrol again |
 | API access | `secrets/litellm_keys.json` → `Authorization: Bearer <key>` to `https://<PUBLIC_HOST>/llm/v1/…` |
 | Read an Authelia link without SMTP | `docker compose exec authelia cat /data/notification.txt` |
@@ -112,6 +112,8 @@ Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first conn
 - **`DOCKER_BRIDGE_IP` must equal the `openshell-docker` gateway.** `nemoclaw-setup.sh` warns when it does not.
 - **GitHub drops HTTP/2 clones from this host**: `nemoclaw-setup.sh install` forces HTTP/1.1 and retries.
 - Secrets, `.env`, `authelia/users.yml` and `data/` are git-ignored. Nothing prints secret values.
+
+- **Portainer's user isolation is not a security boundary.** It keeps users' containers private from each other and blocks bind mounts, privileged mode and the like, but a user can still start a container on the host network or on `ai-stack_ai` and forge the `Remote-*` headers that the dashboard and Grafana trust. Only give `users` to people you would trust with admin access. Fix, if that changes: a filtering proxy in front of Portainer's Docker socket, and a shared secret from Caddy for header-trusting services.
 
 ## Troubleshooting
 
