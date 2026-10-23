@@ -24,8 +24,8 @@
       <tbody>
       {% for p in d.pending %}
         <tr>
-          <td>{{ p.name }}<br><small style="color:var(--muted)">{{ p.kind }} · {{ p.device_id | short }}…{% if p.client %} · {{ p.client }}{% endif %}</small></td>
-          <td>{{ p.ip or "—" }}{% if p.suggested_user %}<br><small style="color:var(--muted)">likely {{ p.suggested_user }}</small>{% endif %}</td>
+          <td>{{ p.name }}<br><small>{{ p.kind }} · {{ p.device_id | short }}…{% if p.client %} · {{ p.client }}{% endif %}</small></td>
+          <td>{{ p.ip or "—" }}{% if p.suggested_user %}<br><small>likely {{ p.suggested_user }}</small>{% endif %}</td>
           <td><small>{{ p.scopes | length }} scopes{% if 'operator.admin' in p.scopes %} · <b>admin</b>{% endif %}</small></td>
           <td>{{ p.age_s | ago }}</td>
           <td>
@@ -46,7 +46,7 @@
       {% for x in d.paired %}
         <tr>
           <td><span class="dot {{ 'ok' if x.connected else '' }}"></span>{{ x.label or x.platform or x.client or "device" }}
-            <br><small style="color:var(--muted)">{{ x.device_id | short }}…{% if x.client %} · {{ x.client }}{% endif %}</small></td>
+            <br><small>{{ x.device_id | short }}…{% if x.client %} · {{ x.client }}{% endif %}</small></td>
           <td>{{ x.ip or "—" }}</td>
           <td><small>{{ x.via or "—" }}</small></td>
           <td>{% if x.connected %}now{% else %}{{ x.seen_s | ago }}{% endif %}</td>

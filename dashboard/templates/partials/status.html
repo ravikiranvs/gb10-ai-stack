@@ -1,16 +1,25 @@
 {% set m = s.memory %}{% set g = s.gpu %}
 <div class="card">
   <h2>System</h2>
+  <div class="memhead">
+    <span>Unified memory</span>
+    <b>{% if m.total_gib %}{{ (m.total_gib - m.available_gib) | round(1) }}<span> / {{ m.total_gib }} GiB</span>{% else %}n/a{% endif %}</b>
+  </div>
   <div class="bar"><span style="width: {{ m.used_pct or 0 }}%"></span></div>
-  <div class="stats">
-    <div>Unified memory <b>{% if m.total_gib %}{{ (m.total_gib - m.available_gib) | round(1) }} / {{ m.total_gib }} GiB{% else %}n/a{% endif %}</b></div>
-    <div>GPU <b>{{ g.util_pct | int if g.util_pct is not none else "n/a" }}%</b></div>
-    <div>Temp <b>{{ g.temp_c | int if g.temp_c is not none else "n/a" }} °C</b></div>
-    <div>Power <b>{{ g.power_w | round(1) if g.power_w is not none else "n/a" }} W</b></div>
-    <div>GPU collector
-      <b>{% if g.collector_age_s is none %}<span class="dot bad"></span>no data
-         {% elif g.collector_age_s > 60 %}<span class="dot bad"></span>stale {{ g.collector_age_s }}s
-         {% else %}<span class="dot ok"></span>{{ g.collector_age_s }}s ago{% endif %}</b></div>
+  <div class="metrics">
+    <div class="metric"><label>GPU load</label>
+      <div class="v">{{ g.util_pct | int if g.util_pct is not none else "n/a" }}<em>%</em></div>
+      <div class="bar"><span style="width: {{ g.util_pct or 0 }}%"></span></div></div>
+    <div class="metric"><label>Temperature</label>
+      <div class="v">{{ g.temp_c | int if g.temp_c is not none else "n/a" }}<em>°C</em></div>
+      <div class="bar"><span style="width: {{ [g.temp_c or 0, 100] | min }}%"></span></div></div>
+    <div class="metric"><label>Power</label>
+      <div class="v">{{ g.power_w | round(1) if g.power_w is not none else "n/a" }}<em>W</em></div>
+      <div class="bar"><span style="width: {{ [((g.power_w or 0) / 2.4) | round, 100] | min }}%"></span></div></div>
+    <div class="metric"><label>GPU collector</label>
+      <div class="v" style="font-size:15px;margin-top:8px">{% if g.collector_age_s is none %}<span class="pill bad-p"><span class="dot bad"></span>no data</span>
+         {% elif g.collector_age_s > 60 %}<span class="pill bad-p"><span class="dot bad"></span>stale {{ g.collector_age_s }}s</span>
+         {% else %}<span class="pill ok-p"><span class="dot ok"></span>{{ g.collector_age_s }}s ago</span>{% endif %}</div></div>
   </div>
 </div>
 
@@ -25,8 +34,8 @@
     {% for model in s.models %}
       {% set st = model.state %}
       <tr>
-        <td>{{ model.name }}<br><small style="color:var(--muted)">{{ model.id }}</small></td>
-        <td><span class="dot {{ 'ok' if st == 'ready' else ('warn' if st in ['starting', 'stopping'] else '') }}"></span>{{ st }}</td>
+        <td>{{ model.name }}<br><small>{{ model.id }}</small></td>
+        <td><span class="pill {{ 'ok-p' if st == 'ready' else ('warn-p' if st in ['starting', 'stopping'] else '') }}"><span class="dot {{ 'ok' if st == 'ready' else ('warn' if st in ['starting', 'stopping'] else '') }}"></span>{{ st }}</span></td>
         <td>—</td>
         <td>
           {% if who.admin %}
@@ -42,10 +51,10 @@
     {% endfor %}
     {% set im = s.image %}
       <tr>
-        <td>Image · ComfyUI<br><small style="color:var(--muted)">flux-schnell workflow</small></td>
+        <td>Image · ComfyUI<br><small>flux-schnell workflow</small></td>
         <td>
-          {% if not im.reachable %}<span class="dot bad"></span>unreachable
-          {% else %}<span class="dot {{ 'ok' if im.state in ['hot', 'busy'] else '' }}"></span>{{ im.state }}{% endif %}
+          {% if not im.reachable %}<span class="pill bad-p"><span class="dot bad"></span>unreachable</span>
+          {% else %}<span class="pill {{ 'ok-p' if im.state in ['hot', 'busy'] else '' }}"><span class="dot {{ 'ok' if im.state in ['hot', 'busy'] else '' }}"></span>{{ im.state }}</span>{% endif %}
         </td>
         <td>{% if im.state == 'hot' %}{{ (im.idle_seconds // 60) }}m / {{ (im.idle_limit_seconds // 60) }}m{% else %}—{% endif %}</td>
         <td>
