@@ -21,6 +21,36 @@ models:
     checkEndpoint: /health
     ttl: 0
 
+  # Speech to text. Loads on the first transcription request (about 75 s cold) and unloads after 5 idle minutes.
+  # vLLM's default FlashAttention 2 has no sm_121 kernels, so the decoder and the audio encoder are pinned to Triton and SDPA.
+  whisper-large-v3-turbo:
+    name: "Speech · Whisper large-v3-turbo"
+    cmd: |
+      vllm serve openai/whisper-large-v3-turbo
+        --host 0.0.0.0 --port 10002
+        --served-model-name whisper-large-v3-turbo
+        --gpu-memory-utilization 0.04
+        --max-model-len 448
+        --attention-backend TRITON_ATTN
+        --mm-encoder-attn-backend TORCH_SDPA
+        --otlp-traces-endpoint http://alloy:4317
+    proxy: http://127.0.0.1:10002
+    checkEndpoint: /health
+    ttl: 300
+
+# Without groups llama-swap keeps one model loaded and would evict Qwen for a transcription. `agent` is persistent, so a request
+# for another group never unloads it; `speech` does not unload anything either.
+groups:
+  agent:
+    swap: true
+    exclusive: true
+    persistent: true
+    members: [qwen3.6-35b]
+  speech:
+    swap: false
+    exclusive: false
+    members: [whisper-large-v3-turbo]
+
 hooks:
   on_startup:
     preload:

@@ -21,6 +21,25 @@ model_list:
       supports_function_calling: true
       supports_vision: true
 
+  # Speech. Whisper runs in model-runner (llama-swap loads it on the first request and unloads it after 5 idle minutes);
+  # Kokoro is its own container on the CPU. `whisper-1` and `tts-1` are aliases for clients that hard-code OpenAI's names.
+  - model_name: whisper
+    litellm_params:
+      model: openai/whisper-large-v3-turbo
+      api_base: http://model-runner:8000/v1
+      api_key: unused
+      timeout: 300
+    model_info:
+      mode: audio_transcription
+
+  - model_name: kokoro
+    litellm_params:
+      model: openai/kokoro
+      api_base: http://kokoro:8880/v1
+      api_key: unused
+    model_info:
+      mode: audio_speech
+
 mcp_servers:
   comfy_image:
     url: http://comfy-mcp:9100/mcp
@@ -36,6 +55,9 @@ litellm_settings:
 
 router_settings:
   num_retries: 1
+  model_group_alias:
+    whisper-1: whisper
+    tts-1: kokoro
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

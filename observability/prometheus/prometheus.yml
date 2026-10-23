@@ -29,6 +29,13 @@ scrape_configs:
         labels:
           model: qwen3.6-35b
 
+  # up == 0 while Whisper is unloaded (it unloads after 5 idle minutes)
+  - job_name: vllm-whisper
+    static_configs:
+      - targets: ["model-runner:10002"]
+        labels:
+          model: whisper-large-v3-turbo
+
   - job_name: alloy
     static_configs:
       - targets: ["alloy:12345"]

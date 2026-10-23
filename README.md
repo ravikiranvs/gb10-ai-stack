@@ -99,6 +99,7 @@ Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first conn
 | SSO sign-in | Portainer, Grafana and LiteLLM sign in through Authelia OIDC (clients in `authelia/configuration.yml`). Break-glass: Portainer `scripts/portainer-setup.sh local`; Grafana `/grafana/login?disableAutoLogin=true` (user `admin`, `secrets/grafana_admin_password`); LiteLLM `/llm/fallback/login` (master key) |
 | Lost second factor | `docker compose exec authelia authelia storage user totp delete <login> --config /config/configuration.yml` (and `webauthn delete <login> --all`); they sign in and enrol again |
 | API access | `secrets/litellm_keys.json` → `Authorization: Bearer <key>` to `https://<PUBLIC_HOST>/llm/v1/…` |
+| Speech | Same endpoint and keys: `POST /llm/v1/audio/transcriptions` (model `whisper`, alias `whisper-1`) and `POST /llm/v1/audio/speech` (model `kokoro`, alias `tts-1`, voices such as `af_heart`). Whisper runs in `model-runner`: it loads on the first request (about 75 s) and unloads after 5 idle minutes, so the dashboard shows it as idle most of the time. Kokoro is its own CPU container, always on. Keys restricted to named `models` need `whisper` / `kokoro` added |
 | Read an Authelia link without SMTP | `docker compose exec authelia cat /data/notification.txt` |
 | Everything off the internet | `tailscale funnel --https=443 off` |
 
@@ -109,6 +110,7 @@ Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first conn
 - **OpenClaw needs its own gateway token** on top of Authelia (NemoClaw rewrites it at every start, so single sign-on is impossible). `/connect` hands it to signed-in users; the token is shared, control is by Authelia group and the device list. The Control UI strips `#token=` from the address bar after reading it: normal.
 - **Re-onboarding the sandbox** (needed to change image input, reasoning, context window or the CA) resets OpenClaw config, MCP registration, the gateway token and the device list. Re-run `mcp`, `config`, `notes`; everyone reconnects via `/connect`.
 - **Never set OpenClaw `gateway.auth` to `trusted-proxy`.** The sandbox container then exits at start.
+- **Whisper needs two vLLM flags on the GB10.** FlashAttention 2 has no `sm_121` kernels, so `llama-swap.yaml` pins `--attention-backend TRITON_ATTN --mm-encoder-attn-backend TORCH_SDPA`; without them it dies at start with `No device code available for GPU ISA 121`. Its `groups` entry (Qwen `persistent`, Whisper in its own group) is what stops a transcription from evicting Qwen.
 - **Reloading the model** (editing `model-runner/llama-swap.yaml`, restarting `model-runner`) takes 3 to 4 minutes; chat and image calls wait or fail meanwhile.
 - **`DOCKER_BRIDGE_IP` must equal the `openshell-docker` gateway.** `nemoclaw-setup.sh` warns when it does not.
 - **GitHub drops HTTP/2 clones from this host**: `nemoclaw-setup.sh install` forces HTTP/1.1 and retries.

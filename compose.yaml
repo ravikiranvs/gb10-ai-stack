@@ -213,6 +213,20 @@ services:
       comfyui:
         condition: service_healthy
 
+  # Text to speech (Kokoro 82M) on the CPU: about 3x real time on the Grace cores, so no GPU memory and no idle cost. Internal only;
+  # clients reach it through LiteLLM (`kokoro` model, `tts-1` alias). The arm64 CPU image is multi-arch; weights are in the image.
+  kokoro:
+    image: ${KOKORO_IMAGE}
+    restart: unless-stopped
+    networks: [ai]
+    cpus: 8
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8880/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # ─────────────────────────── Control ───────────────────────────
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0
