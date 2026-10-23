@@ -32,6 +32,14 @@ secrets:
     file: ./secrets/bridge_dashboard_token
   authelia_smtp_password:                  # empty unless SMTP_ADDRESS is set in .env
     file: ./secrets/authelia_smtp_password
+  authelia_oidc_hmac:
+    file: ./secrets/authelia_oidc_hmac
+  authelia_oidc_jwks_key:
+    file: ./secrets/authelia_oidc_jwks_key
+  portainer_oidc_client_hash:
+    file: ./secrets/portainer_oidc_client_hash
+  portainer_admin_password:
+    file: ./secrets/portainer_admin_password
 
 volumes:
   authelia_data: {}
@@ -44,6 +52,7 @@ volumes:
   textfile: {}
   vllm_cache: {}
   caddy_data: {}                           # Caddy's local CA and certificates for the sandbox MCP listener
+  portainer_data: {}                       # Portainer database, license and settings: include in backups
 
 services:
 
@@ -52,6 +61,8 @@ services:
     image: caddy:2.11.7-alpine
     network_mode: host                     # reaches the OpenClaw sandbox forward on host 127.0.0.1:18789
     restart: unless-stopped
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}          # for the OIDC token listener's X-Forwarded-Host
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -70,8 +81,9 @@ services:
       AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /run/secrets/authelia_jwt
       AUTHELIA_SESSION_SECRET_FILE: /run/secrets/authelia_session
       AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage_key
+      AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE: /run/secrets/authelia_oidc_hmac
       TZ: ${TZ}
-    secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password]
+    secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password, authelia_oidc_hmac, authelia_oidc_jwks_key, portainer_oidc_client_hash]
     volumes:
       - ./authelia:/config:ro
       - ./authelia/users.yml:/config/users.yml   # read-write so password resets/changes in the UI can be saved
@@ -238,6 +250,23 @@ services:
     depends_on:
       ops-bridge:
         condition: service_healthy
+
+  # ─────────────────────────── Container management ───────────────────────────
+  # Portainer EE: SSO through Authelia OIDC (authelia/configuration.yml), served at /portainer (Caddy strips the prefix; --base-url makes
+  # Portainer's links relative to it). Holds the read-write Docker socket, so it is only reachable through Caddy on localhost.
+  # Admins manage everything; users get their own private containers (see README, "Portainer").
+  portainer:
+    image: ${PORTAINER_IMAGE}
+    restart: unless-stopped
+    networks: [ai]
+    ports: ["127.0.0.1:9010:9000"]
+    command: ["--base-url", "/portainer", "--admin-password-file", "/run/secrets/portainer_admin_password"]
+    environment:
+      TZ: ${TZ}
+    secrets: [portainer_admin_password]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
 
   # ─────────────────────────── Observability ───────────────────────────
   alloy:

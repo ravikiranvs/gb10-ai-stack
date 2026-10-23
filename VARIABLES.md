@@ -12,6 +12,7 @@ Created from `.env.example` by `scripts/init-secrets.sh`. Holds no secrets. Afte
 | `DOCKER_BRIDGE_IP` | **Check.** What the sandbox sees as `host.openshell.internal`; LiteLLM `:4000` and Alloy `:4318` publish on it. Must equal the gateway of the `openshell-docker` network, known only after the first onboard (README step 5). Re-check after any recreate of that network and after a reboot | `172.17.0.1`, later `172.21.0.1` |
 | `MODELS_DIR` | Model weights: `hf/` for vLLM, `comfy/` for ComfyUI | `/srv/models` |
 | `TZ` | Timezone | `UTC` |
+| `PORTAINER_IMAGE` | Portainer EE tag (arm64). Needs a license, entered in the UI | `portainer/portainer-ee:2.45.3` |
 | `*_IMAGE`, `LLAMA_SWAP_VERSION`, `COMFYUI_REF` | Pinned versions | see `.env.example` |
 | `COMFY_IDLE_MINUTES` | Idle time before the dashboard frees ComfyUI | `10` |
 | `COMFY_DEFAULT_STEPS` | Sampler steps for `generate_image` | `4` |
@@ -31,6 +32,9 @@ Created by `scripts/init-secrets.sh`, never overwritten; one value per file with
 | `grafana_admin_password` | Built-in Grafana `admin` (generated, mode 644); day-to-day access is through Authelia |
 | `bridge_dashboard_token` | Dashboard's credential for ops-bridge (generated, mode 644) |
 | `authelia_smtp_password` | SMTP password / API key. Empty unless SMTP is on. `read -rs k && printf '%s' "$k" > secrets/authelia_smtp_password` |
+| `authelia_oidc_hmac`, `authelia_oidc_jwks_key` | Authelia OpenID Connect provider: HMAC secret and RSA signing key (generated) |
+| `portainer_oidc_secret`, `portainer_oidc_client_hash` | Portainer's OIDC client secret (plain, used by `scripts/portainer-setup.sh`) and its PBKDF2 hash (in the Authelia config) (generated) |
+| `portainer_admin_password` | Portainer's break-glass `admin` account (generated); day-to-day login is Authelia |
 | `hf_token` | Hugging Face token; may be empty (models are not gated) |
 | `litellm_keys.json` | Virtual keys from `scripts/create-litellm-keys.sh` (`openclaw-sandbox`, `laptop`, `scripts`) |
 
@@ -77,6 +81,7 @@ Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (l
 | Script | Use |
 |---|---|
 | `init-secrets.sh` | First run: secrets, `.env`, `users.yml`, `data/` |
+| `portainer-setup.sh` | `config`: Portainer environment, regular-user restrictions, `users` team, OAuth settings (re-runnable). `sso` / `local`: switch login between Authelia and Portainer accounts. Needs the license added in the UI first |
 | `create-litellm-keys.sh` | After LiteLLM is up. `LITELLM_API` overrides the URL. Edit the three key definitions for other limits; MCP access goes to `openclaw-sandbox` only |
 | `add-user.sh` | See Users |
 | `nemoclaw-setup.sh` | `install`, `ca`, `onboard`, `mcp`, `config [--dry-run]`, `notes`; reads `.env` and `secrets/litellm_keys.json`, never prints keys. `onboard` sets build-time options (text+image input, reasoning, Caddy CA); change them only by running `onboard` again |

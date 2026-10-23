@@ -80,6 +80,15 @@ http://:9080 {
 		}
 	}
 
+	# Portainer (prefix stripped; Authelia is its OIDC provider, so no forward_auth here)
+	redir /portainer /portainer/
+	handle /portainer/* {
+		uri strip_prefix /portainer
+		reverse_proxy 127.0.0.1:9010 {
+			import stream
+		}
+	}
+
 	# One-click sign-in to OpenClaw for any signed-in admin or user (the dashboard hands over the gateway token)
 	handle /connect {
 		import authelia
@@ -132,5 +141,22 @@ https://172.17.0.1:8443 {
 	log {
 		output stdout
 		format json
+	}
+}
+
+# Server-side OIDC calls from Portainer (token and userinfo). Containers cannot reach the Funnel hostname, and Authelia needs the
+# public host in X-Forwarded-* to build its issuer, so this listener adds them and exposes nothing but the OIDC endpoints.
+# Plain http on docker0 only; not published through Funnel.
+http://172.17.0.1:9081 {
+	bind 172.17.0.1
+	@oidc path /auth/api/oidc/token /auth/api/oidc/userinfo
+	handle @oidc {
+		reverse_proxy 127.0.0.1:9091 {
+			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Host {$PUBLIC_HOST}
+		}
+	}
+	handle {
+		respond 404
 	}
 }

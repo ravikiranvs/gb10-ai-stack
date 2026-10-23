@@ -28,6 +28,22 @@ gen litellm_db_password  "$(rand 24)"
 gen grafana_admin_password "$(rand 24)"
 [[ -e "$SECRETS/authelia_smtp_password" ]] || { : > "$SECRETS/authelia_smtp_password"; echo "created  secrets/authelia_smtp_password (empty: fill it only if you enable SMTP)"; }
 gen bridge_dashboard_token  "$(rand 32)"     # the dashboard's credential for ops-bridge
+gen portainer_admin_password "$(rand 24)"     # break-glass local admin; day-to-day login is SSO
+gen authelia_oidc_hmac     "$(rand 32)"
+gen portainer_oidc_secret  "$(rand 32)"     # plaintext client secret, pasted into Portainer's OAuth settings
+if [[ ! -s "$SECRETS/authelia_oidc_jwks_key" ]]; then
+  openssl genrsa 2048 2>/dev/null > "$SECRETS/authelia_oidc_jwks_key"
+  echo "created  secrets/authelia_oidc_jwks_key"
+else
+  echo "keep     secrets/authelia_oidc_jwks_key"
+fi
+if [[ ! -s "$SECRETS/portainer_oidc_client_hash" ]]; then
+  docker run --rm authelia/authelia:4.39.28 authelia crypto hash generate pbkdf2 --password "$(cat "$SECRETS/portainer_oidc_secret")" --no-confirm \
+    | sed -n 's/^Digest: //p' | tr -d '\n' > "$SECRETS/portainer_oidc_client_hash"
+  echo "created  secrets/portainer_oidc_client_hash"
+else
+  echo "keep     secrets/portainer_oidc_client_hash"
+fi
 
 # Prometheus runs as nobody and reads this file to scrape LiteLLM /llm/metrics
 chmod 644 "$SECRETS/litellm_master_key"

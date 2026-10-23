@@ -48,7 +48,7 @@ rm -rf /srv/models/comfy/checkpoints/.cache
 ```bash
 docker compose up -d --build authelia litellm-db litellm model-runner comfyui comfy-mcp
 bash scripts/create-litellm-keys.sh          # → secrets/litellm_keys.json: openclaw-sandbox, laptop, scripts
-docker compose up -d --build alloy prometheus loki tempo grafana node-exporter cadvisor gpu-exporter docker-socket-proxy ops-bridge caddy admin-dashboard
+docker compose up -d --build alloy prometheus loki tempo grafana node-exporter cadvisor gpu-exporter docker-socket-proxy ops-bridge caddy admin-dashboard portainer
 ```
 `model-runner` loads the agent model at start: about 6 minutes the first time, 3 to 4 after. Ready when `docker compose exec -T model-runner curl -s localhost:8000/running` shows `"state":"ready"`. **Do not generate images while it loads** (vLLM sizes its cache from free memory; FLUX loading at the same time makes it fail).
 
@@ -78,7 +78,13 @@ scripts/nemoclaw-setup.sh config             # OpenClaw public origin and base p
 scripts/nemoclaw-setup.sh notes              # tells the agent to use the image tool
 ```
 
-**6. Use OpenClaw**
+**6. Portainer**
+```bash
+scripts/portainer-setup.sh config            # environment, restrictions for regular users, `users` team, OAuth settings
+```
+Open `https://<PUBLIC_HOST>/portainer/`, sign in as `admin` (password in `secrets/portainer_admin_password`) and enter your license under *Settings → Licenses*. Portainer refuses every non-admin login until a license is present. Then `scripts/portainer-setup.sh sso` switches login to Authelia. After that, `admins` are Portainer administrators and `users` are Standard Users.
+
+**7. Use OpenClaw**
 
 Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first connection from a browser shows "Device pairing required": approve it in the dashboard (`/home/`, *OpenClaw devices* card). Ask the agent for an image; the first one takes a minute or two while FLUX loads.
 
@@ -89,6 +95,7 @@ Open `https://<PUBLIC_HOST>/connect`. It signs you into OpenClaw. The first conn
 | Add a person | `scripts/add-user.sh <login> <email> [users\|admins]`. They press **Reset password** on the sign-in page, then open `/connect`; you approve their browser. `users` get the landing page (`/home/`, read-only status), OpenClaw, LiteLLM UI and Grafana (viewer); `admins` also get the dashboard controls, device approval and ComfyUI. A new admin is a Grafana `Viewer` until promoted there |
 | Let a group of people in quickly | Dashboard → *OpenClaw devices* → **Open for 10 min**: new browsers approve themselves and are labelled by who opened `/connect` |
 | Remove a person | Delete their block in `authelia/users.yml` (via `docker compose exec authelia`, see [VARIABLES](VARIABLES.md#users-authelia)) and **Revoke** their devices in the dashboard |
+| Portainer | `admins` see and manage everything. `users` can create, run and delete their own containers (private to them by default; they can choose to share with the `users` team) but cannot see or change anyone else's or the stack's, and cannot use bind mounts, privileged mode, host namespaces, device mappings, extra capabilities or stacks. GPU containers (`--gpus`) are allowed; published ports and resource use are not limited. Break-glass: `scripts/portainer-setup.sh local`, then sign in as `admin` |
 | Lost second factor | `docker compose exec authelia authelia storage user totp delete <login> --config /config/configuration.yml` (and `webauthn delete <login> --all`); they sign in and enrol again |
 | API access | `secrets/litellm_keys.json` → `Authorization: Bearer <key>` to `https://<PUBLIC_HOST>/llm/v1/…` |
 | Read an Authelia link without SMTP | `docker compose exec authelia cat /data/notification.txt` |
