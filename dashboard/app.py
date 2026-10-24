@@ -130,6 +130,7 @@ async def collect_status() -> dict:
         key=lambda s: s["name"],
     )
     sandbox = next((s for s in services if NEMOCLAW_SANDBOX in s["name"]), None)
+    tts = next((s for s in services if "kokoro" in s["name"]), None)
 
     gib = 1024 ** 3
     return {
@@ -139,6 +140,7 @@ async def collect_status() -> dict:
         "services": services,
         "docker_reachable": containers is not None,
         "sandbox": sandbox,
+        "tts": tts,
         "memory": {
             "available_gib": round(mem_avail / gib, 1) if mem_avail else None,
             "total_gib": round(mem_total / gib, 1) if mem_total else None,

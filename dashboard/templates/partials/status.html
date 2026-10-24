@@ -64,6 +64,18 @@
           {% endif %}
         </td>
       </tr>
+    {% set tts = s.tts %}
+      <tr>
+        <td>Speech · Kokoro<br><small>kokoro · text to speech, CPU, always on</small></td>
+        <td>
+          {% if not tts %}<span class="pill bad-p"><span class="dot bad"></span>not found</span>
+          {% elif tts.state == 'running' and 'unhealthy' not in (tts.status or '') and 'starting' not in (tts.status or '') %}<span class="pill ok-p"><span class="dot ok"></span>ready</span>
+          {% elif tts.state == 'running' %}<span class="pill warn-p"><span class="dot warn"></span>{{ 'unhealthy' if 'unhealthy' in tts.status else 'starting' }}</span>
+          {% else %}<span class="pill bad-p"><span class="dot bad"></span>{{ tts.state }}</span>{% endif %}
+        </td>
+        <td>—</td>
+        <td></td>
+      </tr>
     </tbody>
   </table>
 </div>

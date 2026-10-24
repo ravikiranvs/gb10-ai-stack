@@ -3,7 +3,7 @@
 # "Reset password" on the sign-in page (the link is e-mailed, or written to a file when SMTP is not configured).
 #
 #   scripts/add-user.sh <username> <email> [group] [display name]
-#     group: users (default; can open OpenClaw via /connect, Grafana as Viewer, Portainer for their own containers) or admins (everything).
+#     group: users (default; can open OpenClaw via /connect, Grafana as Viewer, Portainer for their own containers, Jupyter, Storage, Terminal) or admins (everything).
 #            Add ,litellm for a LiteLLM UI seat (SSO is free for 5 people), e.g. users,litellm
 set -euo pipefail
 
@@ -43,4 +43,11 @@ else
   echo "  docker compose exec authelia cat /data/notification.txt"
   echo "and send them the link. (Set SMTP_ADDRESS in .env to have it e-mailed instead.)"
 fi
-if [[ "$group" == users* ]]; then echo "They open OpenClaw through https://<host>/connect; you approve their browser in the dashboard's Devices card."; fi
+echo
+echo "What they get, all from the dashboard at https://<host>/home/ after signing in (two-factor is enrolled at first sign-in):"
+echo "  Terminal   a shell on the machine as their own Linux account, no sudo. The account is created by the host timer within 5 minutes"
+echo "             (or now: sudo bash host/sync-accounts.sh); until then /term/ refuses the login."
+echo "  Jupyter    Start or stop my server on the Jupyter tile. The first start also creates their LiteLLM key and their storage bucket."
+echo "  Storage    the MinIO console. Their bucket u-$user only exists after the first notebook start, so tell them to start Jupyter once."
+echo "  Speech     whisper and kokoro through LiteLLM, with the key their notebook already has."
+if [[ "$group" == users* ]]; then echo "  OpenClaw   https://<host>/connect; you approve their browser in the dashboard's Devices card."; fi
