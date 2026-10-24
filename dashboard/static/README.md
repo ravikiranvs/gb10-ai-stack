@@ -19,3 +19,5 @@ To update: download the new `dist/htmx.min.js` from the npm tarball, replace the
 | `grafana.svg` | `public/img/grafana_icon.svg` from the `grafana/grafana` image (the stack mounts a GB10 icon over it at runtime) |
 | `portainer.png` | `apple-touch-icon` (180 px) from the Portainer image |
 | `comfyui.png` | 48 px entry of ComfyUI's `favicon.ico` |
+| `minio.png` | 96 px favicon of the MinIO console (served at `/s3/favicon-96x96.png`) |
+| `jupyter.png` | 64 px entry of Jupyter's `favicon.ico` (served at `/jupyter/static/favicon.ico`) |

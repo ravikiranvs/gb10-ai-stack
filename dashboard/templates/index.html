@@ -66,6 +66,10 @@
     .app img.full { padding: 0; border: 0; }
     .app b { display: block; font-size: 15px; }
     .app small { display: block; line-height: 1.3; }
+    .quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: -6px; color: var(--muted); font-size: 13px; }
+    .quick a { padding: 3px 12px; border: 1px solid var(--line); border-radius: 99px; color: var(--text); text-decoration: none;
+               background: rgba(11,16,32,.35); transition: border-color .15s; }
+    .quick a:hover { border-color: var(--accent); }
     .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; }
     .metric { padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(11,16,32,.35); }
     .metric label { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
@@ -98,8 +102,16 @@
       <a class="app" href="/llm/ui/"><img src="static/icons/litellm.svg" alt=""><div><b>LiteLLM</b><small>Models &amp; API keys</small></div></a>
       <a class="app" href="/grafana/"><img src="static/icons/grafana.svg" alt=""><div><b>Grafana</b><small>Metrics &amp; dashboards</small></div></a>
       <a class="app" href="/portainer/"><img src="static/icons/portainer.png" alt="" class="full"><div><b>Portainer</b><small>Containers</small></div></a>
+      <a class="app" href="/jupyter/"><img src="static/icons/jupyter.png" alt=""><div><b>Jupyter</b><small>Notebooks &amp; GPU</small></div></a>
+      <a class="app" href="/s3/"><img src="static/icons/minio.png" alt=""><div><b>Storage</b><small>Your files &amp; buckets</small></div></a>
       {% if who.admin %}<a class="app" href="/comfy/"><img src="static/icons/comfyui.png" alt="" class="full"><div><b>ComfyUI</b><small>Image workflows</small></div></a>{% endif %}
     </nav>
+    <div class="quick">
+      <span>Notebooks:</span>
+      <a href="/jupyter/hub/home">Start or stop my server</a>
+      <a href="/jupyter/user/{{ who.user }}/voila/">Voilà apps</a>
+      {% if who.admin %}<a href="/jupyter/hub/admin">All servers</a>{% endif %}
+    </div>
     <div id="status" hx-get="partials/status" hx-trigger="load, every 5s" hx-swap="innerHTML">
       <div class="card">Loading…</div>
     </div>
