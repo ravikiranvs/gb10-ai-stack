@@ -87,7 +87,7 @@
     .pill.bad-p { background: rgba(248,113,113,.1); color: var(--bad); border-color: rgba(248,113,113,.3); }
     .stats { display: flex; gap: 24px; flex-wrap: wrap; color: var(--muted); margin-top: 10px; }
     .stats b { color: var(--text); }
-    .htmx-request { opacity: .6; }
+    button.htmx-request { opacity: .6; }   /* not on the polled containers: dimming them every 5 s looked like flicker */
     @media (max-width: 600px) { main { padding: 14px; } header { padding: 10px 14px; } header h1 span { display: none; } }
   </style>
 </head>
@@ -113,11 +113,11 @@
       <a href="/jupyter/user/{{ who.user }}/voila/">Voilà apps</a>
       {% if who.admin %}<a href="/jupyter/hub/admin">All servers</a>{% endif %}
     </div>
-    <div id="status" hx-get="partials/status" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    <div id="status" hx-get="partials/status" hx-trigger="load, every 10s" hx-swap="innerHTML">
       <div class="card">Loading…</div>
     </div>
     {% if who.admin %}
-    <div id="devices" hx-get="partials/devices" hx-trigger="load, every 5s" hx-swap="innerHTML"></div>
+    <div id="devices" hx-get="partials/devices" hx-trigger="load, every 10s" hx-swap="innerHTML"></div>
     {% endif %}
   </main>
 </body>
