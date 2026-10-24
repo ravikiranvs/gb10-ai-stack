@@ -78,6 +78,21 @@ http://:9080 {
 		}
 	}
 
+	# Browser terminal on the host (ttyd on a Unix socket): Authelia with two-factor first. ttyd trusts the Remote-User header, so any copy the
+	# client sent is removed before Authelia's answer sets it, and ttyd is reachable only through this socket. The route block fixes the order:
+	# Caddy otherwise runs forward_auth BEFORE request_header whatever the file says, which would delete the identity Authelia just set (ttyd
+	# then answers 407 Proxy Authentication Required).
+	redir /term /term/
+	handle /term/* {
+		route {
+			request_header -Remote-User
+			import authelia
+			reverse_proxy unix//run/ttyd/ttyd.sock {
+				import stream
+			}
+		}
+	}
+
 	# Grafana (serve_from_sub_path); signs in through Authelia OIDC, so no forward_auth here
 	handle /grafana* {
 		reverse_proxy 127.0.0.1:3000

@@ -12,6 +12,7 @@ x-gpu: &gpu
 networks:
   ai: {}
   obs: {}
+  term: {}                                 # the browser terminal: reaches only the host's dedicated sshd (docker0 gateway)
   notebooks: {}                           # JupyterHub, the per-user notebook containers and LiteLLM; nothing else
 
 secrets:
@@ -57,6 +58,8 @@ secrets:
     file: ./secrets/minio_oidc_client_hash
   jupyterhub_cred_secret:
     file: ./secrets/jupyterhub_cred_secret
+  ssh_ca:
+    file: ./secrets/ssh_ca
 
 volumes:
   authelia_data: {}
@@ -86,6 +89,7 @@ services:
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./branding:/srv/branding:ro
+      - ./data/ttyd/run:/run/ttyd           # ttyd's Unix socket (the browser terminal)
       - caddy_data:/data
 
   authelia:
@@ -320,6 +324,30 @@ services:
       retries: 5
       start_period: 20s
     depends_on: [minio]
+
+  # ─────────────────────────── Host shell in the browser ───────────────────────────
+  # ttyd serves a terminal at /term (Caddy: Authelia with two-factor first). It trusts the Remote-User header, so it listens only on a Unix
+  # socket that Caddy (and its owner) can reach, never on a port; with no header it refuses the connection. For each browser connection it runs
+  # gb10-shell, which signs a one-minute SSH certificate for that person with secrets/ssh_ca and opens a login shell on the HOST through the
+  # dedicated sshd (port 2222 on docker0, see host/gb10-sshd_config; accounts and limits are set up by the host scripts). The session ends
+  # when the shell exits or the tab closes; after `exit` the page waits for Enter instead of starting a new shell by itself (disableReconnect). The container runs as TTYD_UID (the owner of secrets/ssh_ca) with no capabilities and a read-only filesystem.
+  ttyd:
+    build: ./ttyd
+    restart: unless-stopped
+    networks: [term]
+    user: "${TTYD_UID}:${TTYD_GID}"
+    read_only: true
+    tmpfs: ["/tmp"]                          # the launcher's throw-away key
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    secrets: [ssh_ca]
+    environment:
+      GB10_SSH_HOST: gb10-host
+    extra_hosts: ["gb10-host:172.17.0.1"]    # docker0: where the dedicated sshd listens
+    command: ["-i", "/run/ttyd/ttyd.sock", "-b", "/term", "-W", "-O", "-m", "20", "-H", "Remote-User", "-t", "disableReconnect=true", "-I", "/opt/ttyd/index.html", "gb10-shell"]
+    volumes:
+      - ./data/ttyd/run:/run/ttyd            # the socket
+      - ./data/ttyd/etc:/etc/gb10:ro         # known_hosts: the dedicated sshd's host key
 
   # ─────────────────────────── Control ───────────────────────────
   docker-socket-proxy:

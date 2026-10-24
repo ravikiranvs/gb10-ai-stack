@@ -1,0 +1,20 @@
+# Per-user network block for the people who get shell accounts (uids 20000-29999). Everything the stack trusts is reachable from the
+# machine itself (loopback ports that trust Authelia's headers, ComfyUI, Portainer, Docker's networks); these accounts must not reach any
+# of it. They keep the internet, DNS, and the stack's front door (Caddy on 127.0.0.1:9080), which authenticates every request itself.
+# Blocked traffic is dropped, so a refused connection shows up as a timeout, not an immediate error.
+table inet gb10_users		# these two lines make loading the file again replace the table instead of failing
+delete table inet gb10_users
+table inet gb10_users {
+	chain out {
+		type filter hook output priority filter; policy accept;
+		meta skuid < 20000 accept
+		meta skuid > 29999 accept
+		udp dport 53 accept                                  # the local resolver (systemd-resolved on 127.0.0.53)
+		tcp dport 53 accept
+		ip daddr 127.0.0.1 tcp dport 9080 accept             # Caddy: authenticates every request itself
+		fib daddr type local drop                            # any other address of this machine: loopback, LAN, tailnet, Docker gateways
+		ip daddr 172.16.0.0/12 drop                          # containers on Docker's networks
+		# Optional, remove the # to also keep these accounts away from the rest of your LAN (DNS above still works):
+		# ip daddr { 10.0.0.0/8, 192.168.0.0/16 } drop
+	}
+}

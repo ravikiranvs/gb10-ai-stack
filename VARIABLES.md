@@ -15,6 +15,7 @@ Created from `.env.example` by `scripts/init-secrets.sh`. Holds no secrets. Afte
 | `PORTAINER_IMAGE` | Portainer EE tag (arm64). Needs a license, entered in the UI | `portainer/portainer-ee:2.45.3` |
 | `*_IMAGE`, `LLAMA_SWAP_VERSION`, `COMFYUI_REF` | Pinned versions | see `.env.example` |
 | `COMFY_IDLE_MINUTES` | Idle time before the dashboard frees ComfyUI | `10` |
+| `TTYD_UID`, `TTYD_GID` | uid/gid the browser-terminal container runs as. Must own `secrets/ssh_ca` (mode 600): the user that ran `init-secrets.sh` (`id -u`, `id -g`) | `1000` |
 | `NOTEBOOK_MEM_LIMIT` | Memory cap for each person's notebook container, no swap (shared with the GPU on the GB10) | `16g` |
 | `MINIO_IMAGE`, `MC_IMAGE` | MinIO (pgsty community fork) and its `mc` admin tool, pinned. Upstream's images are gone; bump deliberately and retest | `pgsty/minio:RELEASE.2026-08-04T00-00-00Z` |
 | `JUPYTERHUB_VERSION` | JupyterHub image tag and the `jupyterhub` package inside the notebook image. Keep both equal: rebuild `jupyterhub` and `notebook-image` together | `5.5.4` |
@@ -34,6 +35,7 @@ Created by `scripts/init-secrets.sh`, never overwritten; one value per file with
 | `litellm_master_key`, `litellm_db_password`, `litellm.env` | LiteLLM admin key, Postgres password, and the env file LiteLLM loads (generated). Master key is mode 644 so Prometheus can scrape |
 | `grafana_admin_password` | Built-in Grafana `admin` (generated, mode 644); day-to-day access is through Authelia |
 | `bridge_dashboard_token` | Dashboard's credential for ops-bridge (generated, mode 644) |
+| `ssh_ca`, `ssh_ca.pub` | SSH certificate authority for the browser terminal: `ttyd/gb10-shell` signs one-minute certificates with the private key (mode 600, read by the ttyd container); the host's dedicated sshd trusts the public key (`TrustedUserCAKeys`). Anyone holding the private key can log in as any `gb10-users` account, never as admin (generated) |
 | `bridge_jupyterhub_token` | JupyterHub's credential for ops-bridge; it may call only `notebook.*` (generated, mode 644) |
 | `jupyterhub_cred_secret` | Held only by JupyterHub: each person's LiteLLM key and storage key are derived from it, so they are the same on every start. Rotating it changes everyone's keys (they are recreated at the next start) (generated, mode 644) |
 | `minio_root_password`, `minio_oidc_secret`, `minio_oidc_client_hash`, `minio.env` | MinIO root account (`S3ROOT`), its OIDC client secret and the hash Authelia holds, and the env file that carries them to `minio` and `minio-mc` (generated) |
@@ -110,6 +112,8 @@ Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (l
 | `NOTEBOOK_MEM_LIMIT` | `.env` → ops-bridge (`templates.notebook.memory`) |
 | `jupyterhub_cred_secret` | jupyterhub secrets; its derivations are in `jupyterhub/bridge_spawner.py` |
 | `minio.env` | `minio` and `minio-mc` (`env_file`) |
+| `ssh_ca` | ttyd secret; `ssh_ca.pub` is for the host's sshd (`host/`) |
+| `TTYD_UID`, `TTYD_GID` | `.env` → `ttyd` (`user:`) |
 | `MINIO_IMAGE`, `MC_IMAGE` | `.env` → `minio`, `minio-mc` |
 | Host ports 9091, 4000, 3000, 8188, 9000, 9010, 9080, 18789 | `compose.yaml` and Caddyfile (`18789` is the sandbox forward NemoClaw creates) |
 | `DOCKER_BRIDGE_IP` | `.env` = `openshell-docker` gateway = `host.openshell.internal` inside the sandbox |

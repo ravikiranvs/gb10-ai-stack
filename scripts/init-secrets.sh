@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SECRETS="$ROOT/secrets"
 umask 077
-mkdir -p "$SECRETS" "$ROOT/data/comfy-output"
+mkdir -p "$SECRETS" "$ROOT/data/comfy-output" "$ROOT/data/ttyd/run" "$ROOT/data/ttyd/etc"
+[[ -e "$ROOT/data/ttyd/etc/known_hosts" ]] || : > "$ROOT/data/ttyd/etc/known_hosts"   # filled by the host setup (the dedicated sshd's host key)
 chmod 700 "$SECRETS"
 
 gen() {
@@ -54,6 +55,16 @@ for client in portainer grafana litellm jupyterhub minio; do
     echo "keep     secrets/${client}_oidc_client_hash"
   fi
 done
+
+# SSH certificate authority for the browser terminal: ttyd's launcher signs a one-minute certificate for the signed-in person with it, and the
+# host's dedicated sshd trusts the public half. The private key is mode 600 and is read by the ttyd container (TTYD_UID in .env must own it).
+if [[ ! -s "$SECRETS/ssh_ca" ]]; then
+  ssh-keygen -q -t ed25519 -N '' -C "gb10-ssh-ca" -f "$SECRETS/ssh_ca"
+  echo "created  secrets/ssh_ca (+ ssh_ca.pub)"
+else
+  echo "keep     secrets/ssh_ca"
+fi
+chmod 644 "$SECRETS/ssh_ca.pub"
 
 # Prometheus runs as nobody and reads this file to scrape LiteLLM /llm/metrics
 chmod 644 "$SECRETS/litellm_master_key"

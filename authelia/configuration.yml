@@ -46,6 +46,13 @@ access_control:
       policy: two_factor
     - domain: '{{ env "PUBLIC_HOST" }}'
       resources:
+        - '^/term([/?].*)?$'           # shell on the host: the account must also exist there (see host scripts)
+      subject:
+        - 'group:admins'
+        - 'group:users'
+      policy: two_factor
+    - domain: '{{ env "PUBLIC_HOST" }}'
+      resources:
         - '^/comfy([/?].*)?$'
       subject: 'group:admins'
       policy: two_factor

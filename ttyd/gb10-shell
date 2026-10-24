@@ -1,0 +1,30 @@
+#!/bin/bash
+# Launcher for the browser terminal: ttyd runs this once per browser connection. It opens a login shell on the host as the person
+# Authelia signed in, with no password and no stored key: it makes a throw-away key, has the SSH certificate authority sign it for
+# that one account for a minute, and connects. Who the person is comes from ttyd's auth-header mode (TTYD_USER, set from the Remote-User
+# header that Caddy copies from Authelia); with no header, ttyd refuses the connection before this script runs.
+#   GB10_SSH_HOST   host's address as seen from this container      GB10_SSH_PORT   the dedicated sshd (default 2222)
+#   GB10_CERT_TTL   certificate lifetime (default +1m: only the login needs it, an open session keeps running)
+# The session ends when the shell ends (exit) or when the browser tab is closed.
+set -euo pipefail
+
+user="${TTYD_USER:-}"
+if [[ ! "$user" =~ ^[a-z][a-z0-9._-]{1,31}$ ]]; then      # the same rule as scripts/add-user.sh; nothing else reaches ssh-keygen or ssh
+  echo "You are not signed in."; sleep 3; exit 1
+fi
+
+dir="$(mktemp -d)"
+trap 'rm -rf "$dir"' EXIT                                 # ssh runs as a child (no exec) so this still happens when the browser tab closes
+
+ssh-keygen -q -t ed25519 -N '' -C "web-$user" -f "$dir/id"
+ssh-keygen -q -s "${GB10_CA_KEY:-/run/secrets/ssh_ca}" -I "web-$user-$(date +%s)" -n "$user" -V "${GB10_CERT_TTL:-+1m}" \
+  -O no-port-forwarding -O no-agent-forwarding -O no-x11-forwarding "$dir/id.pub" 2>/dev/null
+
+# A plain login shell. Closing the browser tab drops the connection and bash hangs up its jobs; `huponexit` makes `exit` do the same (bash otherwise
+# leaves background jobs running after exit). Never redirect stderr on that exec: an interactive bash draws its prompt and line editing there. Anything started with nohup or setsid, or inside a tmux the person starts by hand, survives on purpose.
+ssh -t -i "$dir/id" -o CertificateFile="$dir/id-cert.pub" -o IdentitiesOnly=yes \
+    -o UserKnownHostsFile="${GB10_KNOWN_HOSTS:-/etc/gb10/known_hosts}" -o StrictHostKeyChecking=yes \
+    -o PreferredAuthentications=publickey -p "${GB10_SSH_PORT:-2222}" "$user@${GB10_SSH_HOST:-gb10-host}" \
+    'if command -v bash >/dev/null 2>&1; then exec bash -O huponexit -l; else exec "$SHELL" -l; fi' || {
+  echo; echo "Could not open a shell for '$user' (no account yet, or the host refused the login). Ask an admin."; sleep 5
+}
