@@ -1,0 +1,50 @@
+#!/bin/sh
+# Start-up wrapper for a person's notebook container (the `cmd` of the `notebook` template in ops-bridge/actions.yaml).
+# The Hub puts the person's keys in the environment; this turns them into the settings the JupyterLab extensions read, then runs the
+# command that follows. The home folder is new at every start, so these files are always written fresh.
+set -e
+mkdir -p "$HOME/.jupyter"
+
+# Example notebooks (Voilà basics and a showcase): copied into the person's folder once; their edits are never overwritten, and deleting
+# the folder brings it back at the next start.
+if [ -d /opt/examples ] && [ -d /work ] && [ ! -e /work/examples ]; then
+  cp -r /opt/examples /work/examples
+fi
+
+# Storage browser (jupyter-fsspec): the person's bucket and the shared one
+if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$S3_BUCKET" ]; then
+  umask 077
+  cat > "$HOME/.jupyter/jupyter-fsspec.yaml" <<YAML
+sources:
+  - name: "My bucket"
+    path: "s3://$S3_BUCKET"
+    kwargs: {key: "$AWS_ACCESS_KEY_ID", secret: "$AWS_SECRET_ACCESS_KEY", endpoint_url: "$AWS_ENDPOINT_URL", config_kwargs: {s3: {addressing_style: path}}}
+  - name: "Shared"
+    path: "s3://${S3_SHARED_BUCKET:-shared}"
+    kwargs: {key: "$AWS_ACCESS_KEY_ID", secret: "$AWS_SECRET_ACCESS_KEY", endpoint_url: "$AWS_ENDPOINT_URL", config_kwargs: {s3: {addressing_style: path}}}
+YAML
+fi
+
+# jupyter-ai: make the stack's agent model the default chat model, reached through LiteLLM with the person's own key (OPENAI_API_KEY is
+# read from the environment). The default is `model_provider_id` plus its parameters under `fields`; without it Jupyternaut answers
+# "No chat model is configured". Qwen's thinking mode is switched off for the default (a reply takes about 0.5 s instead of about 10 s and
+# is not padded with reasoning); the picker also offers the same model with thinking on. `model_kwargs.extra_body` is how the setting
+# reaches vLLM through LiteLLM.
+if [ -n "$OPENAI_API_KEY" ]; then
+  python3 - <<'PY'
+import json, os
+from jupyter_core.paths import jupyter_data_dir
+path = os.path.join(jupyter_data_dir(), "jupyter_ai", "config.json")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+api_base = os.environ.get("OPENAI_BASE_URL", "http://litellm:4000/llm/v1")
+no_thinking = {"api_base": api_base, "model_kwargs": {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}}
+json.dump({"model_provider_id": "openai/agent",
+           "fields": {"openai/agent": no_thinking},
+           "custom_models": [
+               {"name": "Qwen 3.6 (fast, no thinking)", "model_id": "openai/agent", "description": "The stack's agent model with thinking off", "params": no_thinking},
+               {"name": "Qwen 3.6 (thinking)", "model_id": "openai/agent", "description": "The same model with thinking on: slower, better for hard problems", "params": {"api_base": api_base}}]},
+          open(path, "w"))
+PY
+fi
+
+exec "$@"
