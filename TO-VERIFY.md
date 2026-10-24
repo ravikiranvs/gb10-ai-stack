@@ -17,6 +17,8 @@ What was tested on the real GB10 (last updated 2026-10-23), the findings that sh
 - **`scripts/add-user.sh`:** creates the account, Authelia reloads without a restart, duplicate user/e-mail and bad names are rejected.
 - **Docker socket:** Alloy and the dashboard read Docker only through `docker-socket-proxy`; only ops-bridge has the rw socket.
 
+- **Notebooks and storage** (2026-10-24, on the real stack through a throwaway Hub with a dummy login against the real ops-bridge, LiteLLM and MinIO, then removed): a person's container starts in about 14 s with their own LiteLLM key (10 requests a minute enforced: the 11th call gets 429) and storage key as environment variables; `openai`, `langchain-openai`, `boto3`, `s3fs`, pandas and papermill work with no configuration; the key sees only the person's own bucket and `shared`, writes only under `shared/<name>/`; Voilà, the storage browser, resource usage (limit 16 GiB) and the extensions work through the Hub proxy; the bridge refuses bad names, unlisted environment variables, other clients' actions and containers it did not create. MinIO's group-to-policy mapping and per-user variable policies were tested with signed test tokens from a fake identity provider.
+
 ## Findings that shaped the design
 
 - Brevo reported "Delivered" for a reset mail whose sender and recipient were the same `@protonmail.com` address, but Proton silently dropped it. The same mail to Gmail arrived. Use a recipient on another domain, or a sender domain you own (SPF/DKIM).
@@ -33,6 +35,12 @@ What was tested on the real GB10 (last updated 2026-10-23), the findings that sh
 - GitHub drops HTTP/2 clones from this host. node-exporter's `cpufreq` collector hangs on the GB10 (disabled). vLLM FlashAttention fails on `sm_121` only for a tiny test model.
 
 ## Still open
+
+- [ ] **MinIO console in a real browser:** Authelia sign-in at `/s3/`, then the person sees only their bucket and `shared`, an admin sees every bucket, and the console's JavaScript works under the `/s3` prefix (assets, API and the OIDC redirect were fetched correctly; a browser was not available). Also that Authelia's ID token carries `groups` (the policy mapping depends on it).
+- [ ] **jupyter-ai chat in a real browser:** the default model (`agent` through LiteLLM, seeded by `notebook-start`) answers without touching the picker. Tested without the UI: the same agent construction Jupyternaut uses answered, called a tool and kept memory. Two bugs found on the way: no default model was seeded ("No chat model is configured"), and LiteLLM library 1.106 breaks every tool call against `mcp` 1.x (pinned to 1.105.3 in `jupyter/Dockerfile`).
+- [ ] **The Voilà preview panel in JupyterLab** (the **Render with Voilà** toolbar button). It was blank because the single-user server sent `frame-ancestors 'none'`; with `'self'` the page is allowed in the panel and the kernel websocket connects through the Hub proxy (both tested), but the panel itself was not seen.
+- [ ] **The Voilà example pages in a real browser** (`/work/examples`: `voila-basic`, `voila-showcase`). Executed in the real image with a real LiteLLM key and storage key, with every button pressed from code (job, sample and CSV upload, junk upload, model answer, read aloud, save to the person's and the shared bucket; the query string is escaped); the widgets' live behaviour in a browser was not seen. One first run hung for 240 s in the data-explorer cell and did not recur in 6 later runs (cause unknown).
+- [ ] **Idle culling of notebook servers** after an hour, and a large GPU allocation in a notebook next to Qwen (the GPU and memory cannot be partitioned).
 
 - [ ] **`scripts/nemoclaw-setup.sh` on a clean machine.** Only `ca`, `config --dry-run`, `notes` ran through the script; `install`, `onboard`, `mcp` repeat commands that ran by hand.
 - [ ] **A second person's full onboarding:** `add-user.sh` → reset link → set password → enrol a second factor → `/connect` → approval → chat. The reset mail is verified; completing the link is not. Also whether an Authelia restart interferes mid-onboarding.

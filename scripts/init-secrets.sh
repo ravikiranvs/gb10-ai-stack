@@ -28,6 +28,7 @@ gen litellm_db_password  "$(rand 24)"
 gen grafana_admin_password "$(rand 24)"
 [[ -e "$SECRETS/authelia_smtp_password" ]] || { : > "$SECRETS/authelia_smtp_password"; echo "created  secrets/authelia_smtp_password (empty: fill it only if you enable SMTP)"; }
 gen bridge_dashboard_token  "$(rand 32)"     # the dashboard's credential for ops-bridge
+gen bridge_jupyterhub_token "$(rand 32)"     # JupyterHub's credential for ops-bridge (notebook.* actions only)
 gen portainer_admin_password "$(rand 24)"     # break-glass local admin; day-to-day login is SSO
 gen authelia_oidc_hmac     "$(rand 32)"
 gen portainer_oidc_secret  "$(rand 32)"     # plaintext client secret, pasted into Portainer's OAuth settings
@@ -39,8 +40,12 @@ else
 fi
 gen grafana_oidc_secret    "$(rand 32)"
 gen litellm_oidc_secret    "$(rand 32)"
+gen jupyterhub_oidc_secret "$(rand 32)"
+gen minio_oidc_secret      "$(rand 32)"
+gen minio_root_password    "$(rand 24)"       # MinIO root account; day-to-day sign-in is Authelia SSO
+gen jupyterhub_cred_secret "$(rand 32)"       # only JupyterHub holds this: it derives each person's LiteLLM key and storage key from it
 # Authelia stores only a PBKDF2 hash of each OIDC client secret
-for client in portainer grafana litellm; do
+for client in portainer grafana litellm jupyterhub minio; do
   if [[ ! -s "$SECRETS/${client}_oidc_client_hash" ]]; then
     docker run --rm authelia/authelia:4.39.28 authelia crypto hash generate pbkdf2 --password "$(cat "$SECRETS/${client}_oidc_secret")" --no-confirm \
       | sed -n 's/^Digest: //p' | tr -d '\n' > "$SECRETS/${client}_oidc_client_hash"
@@ -58,6 +63,8 @@ chmod 644 "$SECRETS/grafana_admin_password"
 chmod 644 "$SECRETS/bridge_dashboard_token"
 # Grafana (uid 472) reads its OIDC client secret from this file
 chmod 644 "$SECRETS/grafana_oidc_secret"
+# ops-bridge and JupyterHub run with every capability dropped, so even their root user cannot read a file it does not own
+chmod 644 "$SECRETS/bridge_jupyterhub_token" "$SECRETS/jupyterhub_oidc_secret" "$SECRETS/jupyterhub_cred_secret"
 
 if [[ ! -s "$SECRETS/hf_token" ]]; then
   read -r -s -p "Hugging Face token (leave empty to fill in later): " HF
@@ -72,6 +79,16 @@ if [[ ! -s "$SECRETS/litellm.env" ]]; then
     echo "DATABASE_URL=postgresql://litellm:$(cat "$SECRETS/litellm_db_password")@litellm-db:5432/litellm"
   } > "$SECRETS/litellm.env"
   echo "created  secrets/litellm.env"
+fi
+
+if [[ ! -s "$SECRETS/minio.env" ]]; then
+  {
+    echo "MINIO_ROOT_USER=S3ROOT"                    # upper case on purpose: person-derived keys are lower case, so they can never collide
+    echo "MINIO_ROOT_PASSWORD=$(cat "$SECRETS/minio_root_password")"
+    echo "MINIO_IDENTITY_OPENID_CLIENT_SECRET=$(cat "$SECRETS/minio_oidc_secret")"
+    echo "MC_HOST_local=http://S3ROOT:$(cat "$SECRETS/minio_root_password")@minio:9000"     # for the minio-mc helper container
+  } > "$SECRETS/minio.env"
+  echo "created  secrets/minio.env"
 fi
 
 grep -q '^GENERIC_CLIENT_SECRET=' "$SECRETS/litellm.env" || { echo "GENERIC_CLIENT_SECRET=$(cat "$SECRETS/litellm_oidc_secret")" >> "$SECRETS/litellm.env"; echo "updated  secrets/litellm.env (OIDC client secret)"; }

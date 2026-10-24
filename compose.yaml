@@ -12,6 +12,7 @@ x-gpu: &gpu
 networks:
   ai: {}
   obs: {}
+  notebooks: {}                           # JupyterHub, the per-user notebook containers and LiteLLM; nothing else
 
 secrets:
   authelia_jwt:
@@ -46,6 +47,16 @@ secrets:
     file: ./secrets/grafana_oidc_secret
   portainer_admin_password:
     file: ./secrets/portainer_admin_password
+  bridge_jupyterhub_token:
+    file: ./secrets/bridge_jupyterhub_token
+  jupyterhub_oidc_secret:
+    file: ./secrets/jupyterhub_oidc_secret
+  jupyterhub_oidc_client_hash:
+    file: ./secrets/jupyterhub_oidc_client_hash
+  minio_oidc_client_hash:
+    file: ./secrets/minio_oidc_client_hash
+  jupyterhub_cred_secret:
+    file: ./secrets/jupyterhub_cred_secret
 
 volumes:
   authelia_data: {}
@@ -59,6 +70,9 @@ volumes:
   vllm_cache: {}
   caddy_data: {}                           # Caddy's local CA and certificates for the sandbox MCP listener
   portainer_data: {}                       # Portainer database, license and settings: include in backups
+  jupyterhub_data: {}                      # JupyterHub database and cookie secret: include in backups
+  minio_data: {}                           # object storage (each person's bucket and `shared`): include in backups
+                                           # (each person's files are in the volume `jupyter-<user>`, created by ops-bridge: back those up too)
 
 services:
 
@@ -90,7 +104,7 @@ services:
       AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage_key
       AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE: /run/secrets/authelia_oidc_hmac
       TZ: ${TZ}
-    secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password, authelia_oidc_hmac, authelia_oidc_jwks_key, portainer_oidc_client_hash, grafana_oidc_client_hash, litellm_oidc_client_hash]
+    secrets: [authelia_jwt, authelia_session, authelia_storage_key, authelia_smtp_password, authelia_oidc_hmac, authelia_oidc_jwks_key, portainer_oidc_client_hash, grafana_oidc_client_hash, litellm_oidc_client_hash, jupyterhub_oidc_client_hash, minio_oidc_client_hash]
     volumes:
       - ./authelia:/config:ro
       - ./branding:/branding:ro
@@ -118,7 +132,7 @@ services:
   litellm:
     image: ${LITELLM_IMAGE}
     restart: unless-stopped
-    networks: [ai, obs]
+    networks: [ai, obs, notebooks]          # notebooks: the OpenAI-compatible endpoint for people's notebook containers
     ports:
       - "127.0.0.1:4000:4000"
       - "${DOCKER_BRIDGE_IP}:4000:4000"    # reachable from OpenShell sandboxes as host.openshell.internal
@@ -227,6 +241,86 @@ services:
       retries: 5
       start_period: 30s
 
+  # ─────────────────────────── Notebooks ───────────────────────────
+  # JupyterHub at /jupyter: sign-in through Authelia OIDC (admins and users), one JupyterLab container per person on NVIDIA's PyTorch
+  # image (CUDA torch, sm_121) with its own volume, memory cap and GPU. The Hub has no Docker access: it asks ops-bridge to run the
+  # `notebook` template (ops-bridge/actions.yaml). Servers that nobody uses for an hour are stopped; the files stay.
+  # The per-user image is only built, never run from here: `docker compose --profile images build notebook-image`.
+  notebook-image:
+    profiles: [images]
+    image: ai-stack-jupyter:latest
+    build:
+      context: ./jupyter
+      args:
+        BASE_IMAGE: ${PYTORCH_IMAGE}
+        JUPYTERHUB_VERSION: ${JUPYTERHUB_VERSION}
+    command: ["true"]
+
+  jupyterhub:
+    build:
+      context: ./jupyterhub
+      args:
+        JUPYTERHUB_VERSION: ${JUPYTERHUB_VERSION}
+    restart: unless-stopped
+    networks: [ai, notebooks]              # ai: reaches ops-bridge; notebooks: reaches the people's containers
+    ports: ["127.0.0.1:8000:8000"]
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      BRIDGE_URL: http://ops-bridge:9200
+      TZ: ${TZ}
+    secrets: [bridge_jupyterhub_token, jupyterhub_oidc_secret, jupyterhub_cred_secret]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - jupyterhub_data:/data
+    depends_on:
+      ops-bridge:
+        condition: service_healthy
+
+  # ─────────────────────────── Object storage ───────────────────────────
+  # MinIO (the pgsty community fork: upstream's open-source edition is archived and its Docker images are gone). Each person has a bucket
+  # `u-<name>` (50 GiB quota) plus the `shared` bucket (everyone reads, each person writes under shared/<name>/). The S3 API is only on the
+  # `notebooks` network; the console is served at /s3 and signs people in through Authelia OIDC: the `groups` claim names the policy
+  # (minio/policies), so people see only their own bucket and admins see everything. MinIO reads Authelia's discovery document through the
+  # TLS alias in the Caddyfile (containers cannot reach the public hostname) and trusts Caddy's local CA for it.
+  minio:
+    image: ${MINIO_IMAGE}
+    restart: unless-stopped
+    networks: [notebooks]
+    ports: ["127.0.0.1:9001:9001"]          # the console, for Caddy
+    command: ["server", "/data", "--console-address", ":9001"]
+    env_file: ./secrets/minio.env           # MINIO_ROOT_USER/PASSWORD and the OIDC client secret
+    environment:
+      MINIO_BROWSER_REDIRECT_URL: https://${PUBLIC_HOST}/s3
+      MINIO_IDENTITY_OPENID_CONFIG_URL: https://${PUBLIC_HOST}/auth/.well-known/openid-configuration
+      MINIO_IDENTITY_OPENID_CLIENT_ID: minio
+      MINIO_IDENTITY_OPENID_CLAIM_NAME: groups
+      MINIO_IDENTITY_OPENID_SCOPES: openid,profile,email,groups
+      MINIO_IDENTITY_OPENID_DISPLAY_NAME: Authelia
+      SSL_CERT_FILE: /certs/caddy-root.crt
+      TZ: ${TZ}
+    extra_hosts: ["${PUBLIC_HOST}:172.17.0.1"]      # docker0: the Caddy TLS alias
+    volumes:
+      - minio_data:/data
+      - ./data/caddy-root.crt:/certs/caddy-root.crt:ro
+
+  # Helper that holds the `mc` admin tool: sets up `shared` and the policies at start, then idles so ops-bridge can run provisioning in it.
+  minio-mc:
+    image: ${MC_IMAGE}
+    restart: unless-stopped
+    networks: [notebooks]
+    env_file: ./secrets/minio.env           # MC_HOST_local (root credentials) lives only in this container and MinIO
+    entrypoint: ["sh", "/init/init.sh"]
+    volumes:
+      - ./minio:/init:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MC_CONFIG_DIR=/tmp/.mc mc ready local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    depends_on: [minio]
+
   # ─────────────────────────── Control ───────────────────────────
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0
@@ -250,10 +344,13 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    secrets: [bridge_dashboard_token]
+    secrets: [bridge_dashboard_token, bridge_jupyterhub_token]
     environment:
       BRIDGE_CONFIG: /config/actions.yaml
       NEMOCLAW_SANDBOX: ${NEMOCLAW_SANDBOX}
+      NOTEBOOK_IMAGE: ai-stack-jupyter:latest        # built by `docker compose --profile images build notebook-image`
+      NOTEBOOK_NETWORK: ai-stack_notebooks           # <project name>_notebooks
+      NOTEBOOK_MEM_LIMIT: ${NOTEBOOK_MEM_LIMIT}
     volumes:
       - ./ops-bridge/actions.yaml:/config/actions.yaml:ro
       - /var/run/docker.sock:/var/run/docker.sock

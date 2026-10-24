@@ -15,6 +15,9 @@ Created from `.env.example` by `scripts/init-secrets.sh`. Holds no secrets. Afte
 | `PORTAINER_IMAGE` | Portainer EE tag (arm64). Needs a license, entered in the UI | `portainer/portainer-ee:2.45.3` |
 | `*_IMAGE`, `LLAMA_SWAP_VERSION`, `COMFYUI_REF` | Pinned versions | see `.env.example` |
 | `COMFY_IDLE_MINUTES` | Idle time before the dashboard frees ComfyUI | `10` |
+| `NOTEBOOK_MEM_LIMIT` | Memory cap for each person's notebook container, no swap (shared with the GPU on the GB10) | `16g` |
+| `MINIO_IMAGE`, `MC_IMAGE` | MinIO (pgsty community fork) and its `mc` admin tool, pinned. Upstream's images are gone; bump deliberately and retest | `pgsty/minio:RELEASE.2026-08-04T00-00-00Z` |
+| `JUPYTERHUB_VERSION` | JupyterHub image tag and the `jupyterhub` package inside the notebook image. Keep both equal: rebuild `jupyterhub` and `notebook-image` together | `5.5.4` |
 | `COMFY_DEFAULT_STEPS` | Sampler steps for `generate_image` | `4` |
 | `NEMOCLAW_SANDBOX` | Sandbox name given to `nemoclaw onboard`; ops-bridge and the dashboard find its container (`openshell-default--<name>-<id>`) by it | `nemoclaw-assistant` |
 | `SMTP_ADDRESS` | Empty = Authelia writes links to `/data/notification.txt`. Otherwise `smtp://host:587` (STARTTLS) or `submissions://host:465` (TLS); plaintext is refused | `smtp://smtp-relay.brevo.com:587` |
@@ -31,6 +34,10 @@ Created by `scripts/init-secrets.sh`, never overwritten; one value per file with
 | `litellm_master_key`, `litellm_db_password`, `litellm.env` | LiteLLM admin key, Postgres password, and the env file LiteLLM loads (generated). Master key is mode 644 so Prometheus can scrape |
 | `grafana_admin_password` | Built-in Grafana `admin` (generated, mode 644); day-to-day access is through Authelia |
 | `bridge_dashboard_token` | Dashboard's credential for ops-bridge (generated, mode 644) |
+| `bridge_jupyterhub_token` | JupyterHub's credential for ops-bridge; it may call only `notebook.*` (generated, mode 644) |
+| `jupyterhub_cred_secret` | Held only by JupyterHub: each person's LiteLLM key and storage key are derived from it, so they are the same on every start. Rotating it changes everyone's keys (they are recreated at the next start) (generated, mode 644) |
+| `minio_root_password`, `minio_oidc_secret`, `minio_oidc_client_hash`, `minio.env` | MinIO root account (`S3ROOT`), its OIDC client secret and the hash Authelia holds, and the env file that carries them to `minio` and `minio-mc` (generated) |
+| `jupyterhub_oidc_secret`, `jupyterhub_oidc_client_hash` | JupyterHub's OIDC client secret and the PBKDF2 hash Authelia holds (generated) |
 | `authelia_smtp_password` | SMTP password / API key. Empty unless SMTP is on. `read -rs k && printf '%s' "$k" > secrets/authelia_smtp_password` |
 | `authelia_oidc_hmac`, `authelia_oidc_jwks_key` | Authelia OpenID Connect provider: HMAC secret and RSA signing key (generated) |
 | `portainer_oidc_secret`, `portainer_oidc_client_hash` | Portainer's OIDC client secret (plain, used by `scripts/portainer-setup.sh`) and its PBKDF2 hash (in the Authelia config) (generated) |
@@ -53,7 +60,7 @@ docker compose exec -T authelia sh -c 'cat > /config/users.yml' < edited.yml
 | `<username>` | Login name |
 | `displayname`, `email` | Shown in the UI, passed to Grafana. The e-mail receives reset links |
 | `password` | Argon2id hash: `docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2` |
-| `groups` | `admins`: everything. `users`: the dashboard landing page (`/home/`, read-only status), `/openclaw`, `/connect`, Grafana (Viewer) and Portainer (own containers). `litellm`: LiteLLM UI SSO, in addition to `users` or `admins`; keep it to 5 people (LiteLLM's free SSO limit) |
+| `groups` | `admins`: everything. `users`: the dashboard landing page (`/home/`, read-only status), `/openclaw`, `/connect`, Grafana (Viewer), Portainer and Jupyter notebooks (own containers). `litellm`: LiteLLM UI SSO, in addition to `users` or `admins`; keep it to 5 people (LiteLLM's free SSO limit) |
 
 Add people with `scripts/add-user.sh <username> <email> [users|admins] [display name]`: it creates the account with a random, never-shown password and rejects duplicates; the person sets their own via **Reset password**. Remove a person by deleting their block from the file and revoking their devices in the dashboard. Every protected path needs a second factor (TOTP and passkeys both work; passkeys are second-factor only). If someone loses all factors:
 
@@ -99,6 +106,11 @@ Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (l
 | `admins` / `users` groups | `users.yml`, `authelia/configuration.yml`, `compose.yaml` (`ADMIN_GROUP`, `USER_GROUP`) |
 | `/connect` | Caddyfile route, Authelia rule, `dashboard/app.py` |
 | `bridge_dashboard_token` | `actions.yaml` `clients.dashboard.token_file`, ops-bridge and dashboard secrets |
+| `bridge_jupyterhub_token` | `actions.yaml` `clients.jupyterhub.token_file`, ops-bridge and jupyterhub secrets |
+| `NOTEBOOK_MEM_LIMIT` | `.env` → ops-bridge (`templates.notebook.memory`) |
+| `jupyterhub_cred_secret` | jupyterhub secrets; its derivations are in `jupyterhub/bridge_spawner.py` |
+| `minio.env` | `minio` and `minio-mc` (`env_file`) |
+| `MINIO_IMAGE`, `MC_IMAGE` | `.env` → `minio`, `minio-mc` |
 | Host ports 9091, 4000, 3000, 8188, 9000, 9010, 9080, 18789 | `compose.yaml` and Caddyfile (`18789` is the sandbox forward NemoClaw creates) |
 | `DOCKER_BRIDGE_IP` | `.env` = `openshell-docker` gateway = `host.openshell.internal` inside the sandbox |
 | OIDC clients `portainer`, `grafana`, `litellm` | `authelia/configuration.yml` (client ids, redirect URIs, `token_endpoint_auth_method`), `compose.yaml` (Grafana and LiteLLM env), `scripts/portainer-setup.sh`. Redirects: `/portainer/`, `/grafana/login/generic_oauth`, `/llm/sso/callback` |

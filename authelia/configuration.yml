@@ -76,6 +76,20 @@ identity_providers:
             subject:
               - 'group:admins'
               - 'group:users'
+      jupyterhub:                    # notebooks run code in a GPU container; same people as Portainer
+        default_policy: deny
+        rules:
+          - policy: two_factor
+            subject:
+              - 'group:admins'
+              - 'group:users'
+      minio:                         # the storage console; what each person may do is decided by MinIO's policy named after their group
+        default_policy: deny
+        rules:
+          - policy: two_factor
+            subject:
+              - 'group:admins'
+              - 'group:users'
       litellm:                       # LiteLLM's SSO is free for 5 users: only members of the `litellm` group can sign in
         default_policy: deny
         rules:
@@ -104,6 +118,32 @@ identity_providers:
         consent_mode: implicit
         redirect_uris:
           - 'https://{{ env "PUBLIC_HOST" }}/grafana/login/generic_oauth'
+        scopes: ['openid', 'profile', 'email', 'groups']
+        response_types: ['code']
+        grant_types: ['authorization_code']
+        token_endpoint_auth_method: client_secret_basic
+      - client_id: jupyterhub
+        client_name: JupyterHub
+        client_secret: {{ secret "/run/secrets/jupyterhub_oidc_client_hash" | trim | msquote }}
+        public: false
+        authorization_policy: jupyterhub
+        claims_policy: portainer
+        consent_mode: implicit
+        redirect_uris:
+          - 'https://{{ env "PUBLIC_HOST" }}/jupyter/hub/oauth_callback'
+        scopes: ['openid', 'profile', 'email', 'groups']
+        response_types: ['code']
+        grant_types: ['authorization_code']
+        token_endpoint_auth_method: client_secret_basic
+      - client_id: minio
+        client_name: Storage
+        client_secret: {{ secret "/run/secrets/minio_oidc_client_hash" | trim | msquote }}
+        public: false
+        authorization_policy: minio
+        claims_policy: portainer
+        consent_mode: implicit
+        redirect_uris:
+          - 'https://{{ env "PUBLIC_HOST" }}/s3/oauth_callback'
         scopes: ['openid', 'profile', 'email', 'groups']
         response_types: ['code']
         grant_types: ['authorization_code']

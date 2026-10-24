@@ -3,6 +3,11 @@
 Nothing here is specific to any application. Everything the bridge can do is an *action* in actions.yaml: a name, a target
 container, a fixed command, and typed parameters. Callers are *clients* with their own secret and an allow-list of action
 names. There is no way to send a command line: parameters are validated against a pattern and passed as separate arguments.
+
+A second family of actions (spawn, status, stop) manages containers the bridge itself creates from a *template*: image, network,
+limits and volumes are fixed in actions.yaml, the caller supplies only validated parameters (such as a user name) and, if the
+template allows it, environment variables whose names and values match patterns. Such containers carry a label naming their
+template, and the bridge refuses to touch a container that lacks it.
 """
 
 import asyncio
@@ -32,6 +37,11 @@ DEFAULT_MAX_OUTPUT = 65536
 NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 PLACEHOLDER_RE = re.compile(r"^\{([a-z][a-z0-9_]*)\}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RESOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")   # container and volume names: never a path
+SIZE_RE = re.compile(r"^(\d+)([kmg]?)$", re.I)
+TEMPLATE_KINDS = ("spawn", "status", "stop")
+TEMPLATE_LABEL = "ai-stack.bridge.template"
+PLACEHOLDER_ANY_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 
 log = logging.getLogger("ops-bridge")
 
@@ -56,9 +66,86 @@ def expand_env(value: str) -> str:
     return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", sub, value)
 
 
+def parse_size(value, what: str) -> int:
+    m = SIZE_RE.match(str(value).strip())
+    if not m:
+        raise ConfigError(f"{what}: {value!r} is not a size (digits with an optional k, m or g)")
+    return int(m.group(1)) * {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[m.group(2).lower()]
+
+
+def load_params(owner: str, raw_params: dict) -> dict:
+    params = {}
+    for pname, p in (raw_params or {}).items():
+        if not re.match(r"^[a-z][a-z0-9_]*$", pname):
+            raise ConfigError(f"{owner}: parameter name {pname!r} is not valid")
+        pattern = p.get("pattern")
+        if not pattern:
+            raise ConfigError(f"{owner}: parameter {pname} needs a pattern")
+        params[pname] = {"pattern": re.compile(pattern), "max_length": int(p.get("max_length", 256)),
+                         "default": p.get("default")}
+    return params
+
+
+def check_placeholders(owner: str, text: str, params: dict) -> None:
+    for name in PLACEHOLDER_ANY_RE.findall(text):
+        if name not in params:
+            raise ConfigError(f"{owner}: {{{name}}} is used but no such parameter is declared")
+
+
+def load_template(tname: str, t: dict) -> dict:
+    owner = f"template {tname}"
+    params = load_params(owner, t.get("params"))
+    if not params:
+        raise ConfigError(f"{owner}: at least one parameter is required (it keeps the containers apart)")
+    for key in ("image", "name", "network"):
+        if not t.get(key):
+            raise ConfigError(f"{owner}: {key} is required")
+    name = str(t["name"])
+    check_placeholders(owner, name, params)
+    if not PLACEHOLDER_ANY_RE.search(name):
+        raise ConfigError(f"{owner}: name must contain a {{parameter}}, or every caller would share one container")
+    volumes = {}
+    for vol, path in (t.get("volumes") or {}).items():
+        check_placeholders(owner, str(vol), params)
+        if not str(path).startswith("/"):
+            raise ConfigError(f"{owner}: volume {vol}: the mount path must be absolute")
+        volumes[str(vol)] = str(path)
+    labels = {str(k): str(v) for k, v in (t.get("labels") or {}).items()}
+    for v in labels.values():
+        check_placeholders(owner, v, params)
+    if TEMPLATE_LABEL in labels:
+        raise ConfigError(f"{owner}: the label {TEMPLATE_LABEL} is set by the bridge")
+    env = {str(k): str(v) for k, v in (t.get("env") or {}).items()}
+    for k in env:
+        if not ENV_NAME_RE.match(k):
+            raise ConfigError(f"{owner}: bad environment variable name {k!r}")
+    caller_env = None
+    if t.get("caller_env"):
+        ce = t["caller_env"]
+        if not ce.get("name") or not ce.get("value"):
+            raise ConfigError(f"{owner}: caller_env needs name and value patterns")
+        caller_env = {"name": re.compile(ce["name"]), "value": re.compile(ce["value"], re.S), "max": int(ce.get("max", 32)),
+                      "max_length": int(ce.get("max_length", 4096))}
+    cmd = t.get("cmd")
+    if cmd is not None and (not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd)):
+        raise ConfigError(f"{owner}: cmd must be a list of strings")
+    return {"image": expand_env(str(t["image"])), "name": name, "network": expand_env(str(t["network"])), "params": params,
+            "volumes": volumes, "labels": labels, "env": env, "caller_env": caller_env, "cmd": cmd,
+            "memory": parse_size(expand_env(str(t["memory"])), f"{owner}: memory") if t.get("memory") else 0,
+            "shm_size": parse_size(t["shm_size"], f"{owner}: shm_size") if t.get("shm_size") else 0,
+            "pids_limit": int(t.get("pids_limit", 0)), "gpu": bool(t.get("gpu", False)),
+            "cap_drop": [str(c) for c in (t.get("cap_drop") or [])], "no_new_privileges": bool(t.get("no_new_privileges", True)),
+            "stop_timeout": int(t.get("stop_timeout", 10))}
+
+
 def load_config(path: Path) -> dict:
     raw = yaml.safe_load(path.read_text()) or {}
-    clients, actions = {}, {}
+    clients, actions, templates = {}, {}, {}
+
+    for tname, t in (raw.get("templates") or {}).items():
+        if not NAME_RE.match(tname):
+            raise ConfigError(f"template name {tname!r} is not valid")
+        templates[tname] = load_template(tname, t)
 
     for cname, c in (raw.get("clients") or {}).items():
         if not NAME_RE.match(cname):
@@ -78,24 +165,23 @@ def load_config(path: Path) -> dict:
         if not NAME_RE.match(aname):
             raise ConfigError(f"action name {aname!r} is not valid")
         kind = a.get("kind", "exec")
-        if kind not in ("exec", "restart", "logs"):
+        if kind not in ("exec", "restart", "logs", *TEMPLATE_KINDS):
             raise ConfigError(f"action {aname}: unknown kind {kind!r}")
-        target = a.get("target") or {}
-        if bool(target.get("name")) == bool(target.get("label")):
-            raise ConfigError(f"action {aname}: target needs exactly one of name (a regex) or label (key=value)")
-        sel = {"name": expand_env(target["name"])} if target.get("name") else {"label": expand_env(target["label"])}
-        if "name" in sel:
-            re.compile(sel["name"])
-
-        params = {}
-        for pname, p in (a.get("params") or {}).items():
-            if not re.match(r"^[a-z][a-z0-9_]*$", pname):
-                raise ConfigError(f"action {aname}: parameter name {pname!r} is not valid")
-            pattern = p.get("pattern")
-            if not pattern:
-                raise ConfigError(f"action {aname}: parameter {pname} needs a pattern")
-            params[pname] = {"pattern": re.compile(pattern), "max_length": int(p.get("max_length", 256)),
-                             "default": p.get("default")}
+        if kind in TEMPLATE_KINDS:
+            tname = a.get("template")
+            if tname not in templates:
+                raise ConfigError(f"action {aname}: template {tname!r} is not defined")
+            if a.get("target") or a.get("params"):
+                raise ConfigError(f"action {aname}: a {kind} action takes its target and parameters from its template")
+            sel, params = {"template": tname}, templates[tname]["params"]
+        else:
+            target = a.get("target") or {}
+            if bool(target.get("name")) == bool(target.get("label")):
+                raise ConfigError(f"action {aname}: target needs exactly one of name (a regex) or label (key=value)")
+            sel = {"name": expand_env(target["name"])} if target.get("name") else {"label": expand_env(target["label"])}
+            if "name" in sel:
+                re.compile(sel["name"])
+            params = load_params(f"action {aname}", a.get("params"))
 
         action = {"kind": kind, "target": sel, "params": params, "description": a.get("description", ""),
                   "sensitive": bool(a.get("sensitive", False)), "timeout": int(a.get("timeout", DEFAULT_TIMEOUT)),
@@ -127,7 +213,7 @@ def load_config(path: Path) -> dict:
             action["exec"] = {"user": ex.get("user"), "run_as": ex.get("run_as"), "env": ex.get("env") or {},
                               "env_from_json_file": ex.get("env_from_json_file") or {},
                               "netns_of_process": (ex.get("netns_of_process") or {}).get("argv0")}
-        elif params:
+        elif params and kind not in TEMPLATE_KINDS:
             raise ConfigError(f"action {aname}: only exec actions take parameters")
         if kind == "logs":
             action["tail"] = int(a.get("tail", 200))
@@ -137,7 +223,7 @@ def load_config(path: Path) -> dict:
         for pat in c["allow"]:
             if not any(fnmatch.fnmatchcase(n, pat) for n in actions):
                 raise ConfigError(f"client {cname}: allow pattern {pat!r} matches no action")
-    return {"clients": clients, "actions": actions}
+    return {"clients": clients, "actions": actions, "templates": templates}
 
 
 # ─────────────────────────── Docker API ───────────────────────────
@@ -238,6 +324,114 @@ class Docker:
         info = (await self.client.get(f"/exec/{eid}/json")).json()
         out, err = self.demux(bytes(data))
         return {"exit_code": info.get("ExitCode"), "stdout": out, "stderr": err}
+
+    async def inspect(self, name: str) -> dict | None:
+        r = await self.client.get(f"/containers/{name}/json")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+
+    async def remove(self, name: str, stop_timeout: int) -> None:
+        r = await self.client.post(f"/containers/{name}/stop", params={"t": stop_timeout})
+        if r.status_code not in (204, 304, 404):
+            raise HTTPException(502, f"docker could not stop the container ({r.status_code})")
+        r = await self.client.delete(f"/containers/{name}", params={"v": 0, "force": 1})   # the named volumes stay
+        if r.status_code not in (204, 404):
+            raise HTTPException(502, f"docker could not remove the container ({r.status_code})")
+
+
+# ─────────────────────────── template containers ───────────────────────────
+
+def fill(text: str, params: dict) -> str:
+    return PLACEHOLDER_ANY_RE.sub(lambda m: params[m.group(1)], text)
+
+
+def template_names(tpl: dict, params: dict) -> tuple[str, dict]:
+    """The container name and volume binds for these parameters. Re-checked here: a loose pattern must never produce a path."""
+    name = fill(tpl["name"], params)
+    if not RESOURCE_NAME_RE.match(name):
+        raise HTTPException(422, "the parameters produce an invalid container name")
+    binds = {}
+    for vol, path in tpl["volumes"].items():
+        vname = fill(vol, params)
+        if not RESOURCE_NAME_RE.match(vname):
+            raise HTTPException(422, "the parameters produce an invalid volume name")
+        binds[vname] = path
+    return name, binds
+
+
+def check_caller_env(tpl: dict, supplied) -> dict:
+    if supplied in (None, {}):
+        return {}
+    ce = tpl["caller_env"]
+    if ce is None:
+        raise HTTPException(422, "this template does not accept environment variables")
+    if not isinstance(supplied, dict) or len(supplied) > ce["max"]:
+        raise HTTPException(422, "env must be an object with a limited number of entries")
+    out = {}
+    for k, v in supplied.items():
+        if not isinstance(k, str) or not isinstance(v, str) or not ce["name"].fullmatch(k) or len(v) > ce["max_length"] \
+                or not ce["value"].fullmatch(v):
+            raise HTTPException(422, f"environment variable {str(k)[:40]!r} is not allowed")
+        out[k] = v
+    return out
+
+
+def managed(info: dict | None, tname: str) -> bool:
+    return bool(info) and (info.get("Config", {}).get("Labels") or {}).get(TEMPLATE_LABEL) == tname
+
+
+async def run_template(docker: Docker, action: dict, params: dict, supplied_env) -> dict:
+    tname = action["target"]["template"]
+    tpl = STATE["config"]["templates"][tname]
+    name, binds = template_names(tpl, params)
+    info = await docker.inspect(name)
+    if info is not None and not managed(info, tname):
+        raise HTTPException(409, "a container with that name exists but was not created from this template")
+    kind = action["kind"]
+    ok = {"ok": True, "exit_code": 0, "stderr": "", "truncated": False, "name": name}
+
+    if kind == "status":
+        state = (info or {}).get("State", {})
+        return {**ok, "stdout": "", "state": state.get("Status", "missing"), "exit_code": state.get("ExitCode", 0)}
+
+    if kind == "stop":
+        if info is not None:
+            await docker.remove(name, tpl["stop_timeout"])
+        return {**ok, "stdout": "", "state": "missing"}
+
+    # spawn: always a fresh container, so a new environment (for instance a new API token) takes effect
+    env = {**tpl["env"], **check_caller_env(tpl, supplied_env)}
+    if tpl["memory"]:
+        env.setdefault("MEM_LIMIT", str(tpl["memory"]))       # jupyter-resource-usage reads this to show the limit
+    if info is not None:
+        await docker.remove(name, tpl["stop_timeout"])
+    host = {"NetworkMode": tpl["network"], "RestartPolicy": {"Name": "no"}, "CapDrop": tpl["cap_drop"],
+            "Binds": [f"{v}:{path}" for v, path in binds.items()]}
+    if tpl["no_new_privileges"]:
+        host["SecurityOpt"] = ["no-new-privileges"]
+    if tpl["memory"]:
+        host["Memory"] = host["MemorySwap"] = tpl["memory"]       # no swap: the limit is the limit
+    if tpl["shm_size"]:
+        host["ShmSize"] = tpl["shm_size"]
+    if tpl["pids_limit"]:
+        host["PidsLimit"] = tpl["pids_limit"]
+    if tpl["gpu"]:
+        host["DeviceRequests"] = [{"Driver": "", "Count": -1, "DeviceIDs": None, "Capabilities": [["gpu"]], "Options": {}}]
+    body = {"Image": tpl["image"], "Env": [f"{k}={v}" for k, v in env.items()],
+            "Labels": {**{k: fill(v, params) for k, v in tpl["labels"].items()}, TEMPLATE_LABEL: tname},
+            "HostConfig": host, "NetworkingConfig": {"EndpointsConfig": {tpl["network"]: {}}}}
+    if tpl["cmd"]:
+        body["Cmd"] = tpl["cmd"]
+    r = await docker.client.post("/containers/create", params={"name": name}, json=body)
+    if r.status_code != 201:
+        raise HTTPException(502, f"docker refused to create the container ({r.status_code}): {r.text[:300]}")
+    r = await docker.client.post(f"/containers/{name}/start")
+    if r.status_code != 204:
+        await docker.client.delete(f"/containers/{name}", params={"v": 0, "force": 1})
+        raise HTTPException(502, f"docker could not start the container ({r.status_code}): {r.text[:300]}")
+    return {**ok, "stdout": "", "state": "running"}
 
 
 # ─────────────────────────── request handling ───────────────────────────
@@ -353,26 +547,29 @@ async def run_action(name: str, body: dict | None = None, authorization: str | N
         params = bind_params(action, supplied)
         async with SEM:
             docker: Docker = STATE["docker"]
-            cid = await docker.resolve(action["target"])
-            if action["kind"] == "exec":
-                cmd, user = build_exec(action, params)
-                res = await docker.exec(cid, cmd, user, action["timeout"], action["max_output"])
-                stdout, t1 = trim(res["stdout"], action["max_output"])
-                stderr, t2 = trim(res["stderr"], action["max_output"])
-                result = {"ok": res["exit_code"] == 0, "exit_code": res["exit_code"], "stdout": stdout, "stderr": stderr,
-                          "truncated": t1 or t2}
-                if action["output"] == "json":
-                    result["json"] = extract_json(stdout)
-            elif action["kind"] == "restart":
-                r = await docker.client.post(f"/containers/{cid}/restart", params={"t": 10})
-                result = {"ok": r.status_code == 204, "exit_code": 0 if r.status_code == 204 else 1, "stdout": "", "stderr": "",
-                          "truncated": False}
+            if action["kind"] in TEMPLATE_KINDS:
+                result = await run_template(docker, action, params, (body or {}).get("env"))
             else:
-                r = await docker.client.get(f"/containers/{cid}/logs", params={"stdout": 1, "stderr": 1, "timestamps": 1,
-                                                                                "tail": action["tail"]})
-                out, err = Docker.demux(r.content)
-                text, trunc = trim(out + err, action["max_output"])
-                result = {"ok": r.status_code == 200, "exit_code": 0, "stdout": text, "stderr": "", "truncated": trunc}
+                cid = await docker.resolve(action["target"])
+                if action["kind"] == "exec":
+                    cmd, user = build_exec(action, params)
+                    res = await docker.exec(cid, cmd, user, action["timeout"], action["max_output"])
+                    stdout, t1 = trim(res["stdout"], action["max_output"])
+                    stderr, t2 = trim(res["stderr"], action["max_output"])
+                    result = {"ok": res["exit_code"] == 0, "exit_code": res["exit_code"], "stdout": stdout, "stderr": stderr,
+                              "truncated": t1 or t2}
+                    if action["output"] == "json":
+                        result["json"] = extract_json(stdout)
+                elif action["kind"] == "restart":
+                    r = await docker.client.post(f"/containers/{cid}/restart", params={"t": 10})
+                    result = {"ok": r.status_code == 204, "exit_code": 0 if r.status_code == 204 else 1, "stdout": "", "stderr": "",
+                              "truncated": False}
+                else:
+                    r = await docker.client.get(f"/containers/{cid}/logs", params={"stdout": 1, "stderr": 1, "timestamps": 1,
+                                                                                    "tail": action["tail"]})
+                    out, err = Docker.demux(r.content)
+                    text, trunc = trim(out + err, action["max_output"])
+                    result = {"ok": r.status_code == 200, "exit_code": 0, "stdout": text, "stderr": "", "truncated": trunc}
     except HTTPException as exc:
         audit(client=client, action=name, result="error", status=exc.status_code, detail=exc.detail,
               ms=round((time.monotonic() - started) * 1000))

@@ -19,11 +19,53 @@
 # target: `name` (a regex matched against container names) or `label` (key=value). It must select exactly one running container.
 # ${VAR} in a target is replaced from the bridge's environment (compose passes NEMOCLAW_SANDBOX).
 # `sensitive: true` keeps the parameters and result out of the audit log.
+#
+# Template actions (kinds spawn, status, stop) manage containers the bridge creates itself, from a `templates:` entry below. The
+# template fixes everything that matters (image, network, limits, volumes, capabilities); the caller supplies only the template's
+# parameters and, when `caller_env` is set, environment variables whose names and values match its patterns. Every such container
+# carries the label ai-stack.bridge.template=<template>, and the bridge will not touch a container without it.
+#   spawn   removes any previous container of that name, then creates and starts a fresh one (named volumes survive)
+#   status  reports running / exited / missing
+#   stop    stops and removes the container (named volumes survive)
 
 clients:
   dashboard:
     token_file: /run/secrets/bridge_dashboard_token
     allow: ["openclaw.devices.*", "openclaw.gateway_token"]
+  jupyterhub:
+    token_file: /run/secrets/bridge_jupyterhub_token
+    allow: ["notebook.*", "litellm.key", "s3.provision"]
+
+templates:
+  # One JupyterLab container per person, started by JupyterHub (jupyterhub/bridge_spawner.py). It sits on the `notebooks` network
+  # only, with LiteLLM, so it cannot reach services that trust Authelia's headers. No host mounts, no capabilities, no swap.
+  notebook:
+    image: ${NOTEBOOK_IMAGE}
+    network: ${NOTEBOOK_NETWORK}
+    name: "notebook-{user}"
+    labels: {ai-stack.user: "{user}"}
+    volumes: {"jupyter-{user}": /work}
+    # notebook-start (in the image) writes the JupyterLab file-browser and jupyter-ai settings from the environment, then runs the rest
+    cmd: [notebook-start, jupyterhub-singleuser, --ServerApp.root_dir=/work, --MappingKernelManager.cull_idle_timeout=3600, --MappingKernelManager.cull_interval=300]
+    env:
+      OPENAI_BASE_URL: "http://litellm:4000/llm/v1"      # the openai package
+      OPENAI_API_BASE: "http://litellm:4000/llm/v1"      # older LangChain versions
+      AWS_ENDPOINT_URL: "http://minio:9000"               # boto3, s3fs, pandas, papermill
+      AWS_DEFAULT_REGION: "us-east-1"
+      S3_SHARED_BUCKET: "shared"
+    caller_env:                                   # what JupyterHub hands every single-user server: its own variables, the person's
+      name: "(JUPYTERHUB|JPY)_[A-Z0-9_]{1,60}|OPENAI_API_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|S3_BUCKET"   # LiteLLM key and storage keys
+      value: "[^\\x00]{0,4096}"
+      max: 48
+    memory: ${NOTEBOOK_MEM_LIMIT}
+    shm_size: 4g                                  # PyTorch DataLoader workers; no `ipc: host` for user containers
+    pids_limit: 2048
+    gpu: true
+    cap_drop: [ALL]
+    no_new_privileges: true
+    stop_timeout: 20
+    params:
+      user: {pattern: "[a-z][a-z0-9._-]{1,31}", max_length: 32}    # the same rule as scripts/add-user.sh
 
 actions:
 
@@ -104,3 +146,85 @@ actions:
     exec: {user: root}
     argv: [python3, -c, "import json;print(json.load(open('/sandbox/.openclaw/openclaw.json'))['gateway']['auth']['token'])"]
     sensitive: true
+
+  # ───────── Notebook containers for JupyterHub ─────────
+  notebook.spawn:
+    description: Start a fresh notebook container for a user (replaces any existing one)
+    kind: spawn
+    template: notebook
+
+  notebook.status:
+    description: Whether a user's notebook container is running
+    kind: status
+    template: notebook
+
+  notebook.stop:
+    description: Stop and remove a user's notebook container (their files stay)
+    kind: stop
+    template: notebook
+
+  # ───────── Per-person credentials (called by JupyterHub just before it starts a notebook container) ─────────
+  # Both are `sensitive`: the key and secret never reach the audit log. They are derived by the Hub from a secret only it holds,
+  # so they are the same on every start and nothing has to be stored. The administrator credentials stay inside the target containers.
+  litellm.key:
+    description: Create or update a person's LiteLLM key (the value is chosen by the caller), limited to 10 requests a minute
+    kind: exec
+    target: {label: "com.docker.compose.service=litellm"}
+    sensitive: true
+    argv:
+      - python3
+      - -c
+      - |
+        import json, os, sys, urllib.request, urllib.error
+        user, key = sys.argv[1], sys.argv[2]
+        body = {"key": key, "key_alias": "nb-" + user, "models": ["agent", "whisper", "kokoro", "whisper-1", "tts-1"],
+                "rpm_limit": 10, "metadata": {"managed_by": "jupyterhub", "user": user}}
+        def call(path):
+            req = urllib.request.Request("http://127.0.0.1:4000/llm" + path, method="POST", data=json.dumps(body).encode(),
+                                         headers={"Authorization": "Bearer " + os.environ["LITELLM_MASTER_KEY"], "Content-Type": "application/json"})
+            return urllib.request.urlopen(req, timeout=20).status
+        try:
+            call("/key/generate")
+        except urllib.error.HTTPError as e:
+            if e.code != 400 or b"already exists" not in e.read():
+                raise
+            call("/key/update")        # exists: keep its models and limit in step with this file
+      - "{user}"
+      - "{key}"
+    params:
+      user: {pattern: "[a-z][a-z0-9._-]{1,31}", max_length: 32}
+      key: {pattern: "sk-nb-[0-9a-f]{40}", max_length: 46}
+
+  s3.provision:
+    description: Create a person's bucket (50 GiB quota), storage key and policy; the shared bucket and console policies are set up by the minio-mc container
+    kind: exec
+    target: {label: "com.docker.compose.service=minio-mc"}
+    sensitive: true
+    argv:
+      - sh
+      - -c
+      - |
+        set -e
+        user="$1"; access="$2"; secret="$3"; bucket="u-$user"
+        mc mb --ignore-existing "local/$bucket"
+        mc quota set "local/$bucket" --size 50GiB
+        cat > "/tmp/nb-$user.json" <<EOF
+        {"Version":"2012-10-17","Statement":[
+         {"Effect":"Allow","Action":["s3:ListAllMyBuckets","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::*"]},
+         {"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::$bucket","arn:aws:s3:::$bucket/*"]},
+         {"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::shared"]},
+         {"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::shared/*"]},
+         {"Effect":"Allow","Action":["s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload"],"Resource":["arn:aws:s3:::shared/$user/*"]}]}
+        EOF
+        mc admin policy create local "nb-$user" "/tmp/nb-$user.json"
+        mc admin user add local "$access" "$secret"
+        mc admin policy attach local "nb-$user" --user "$access" || true      # already attached on a repeat run
+        rm -f "/tmp/nb-$user.json"
+      - sh
+      - "{user}"
+      - "{access}"
+      - "{secret}"
+    params:
+      user: {pattern: "[a-z][a-z0-9._-]{1,31}", max_length: 32}
+      access: {pattern: "nb-[0-9a-f]{16}", max_length: 19}
+      secret: {pattern: "[0-9a-f]{40}", max_length: 40}
