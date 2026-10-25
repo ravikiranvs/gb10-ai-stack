@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""gb10-elevate: see or end your own temporary sudo (installed as /usr/local/bin/gb10-elevate).
+  gb10-elevate            show whether you are elevated and how to get it
+  gb10-elevate status     the same
+  gb10-elevate drop       end your elevation now
+Starting an elevation is only possible on the dashboard (Authelia two-factor, admins only): this tool cannot grant anything."""
+import json
+import os
+import socket
+import sys
+
+SOCK = os.environ.get("GB10_ELEVATE_SOCK", "/run/gb10-elevate/user.sock")
+
+
+def call(op: str) -> dict:
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(15)
+    try:
+        s.connect(SOCK)
+    except OSError:
+        sys.exit("gb10-elevate: the service is not running (ask the machine's owner: systemctl status gb10-elevated)")
+    s.sendall(json.dumps({"op": op}).encode() + b"\n")
+    data = b""
+    while chunk := s.recv(65536):
+        data += chunk
+    return json.loads(data)
+
+
+def main() -> None:
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    if cmd not in ("status", "drop"):
+        sys.exit("usage: gb10-elevate [status|drop]")
+    r = call(cmd)
+    if not r.get("ok"):
+        sys.exit(f"gb10-elevate: {r.get('error')}")
+    if cmd == "drop":
+        print("elevation ended" if r.get("dropped") else "you were not elevated")
+        return
+    g = r.get("grant")
+    if g:
+        m, s = divmod(g["remaining"], 60)
+        print(f"elevated: sudo works for another {m} min {s:02d} s (reason: {g['reason']}). Everything you do with sudo is recorded.")
+    elif r.get("admin"):
+        url = os.environ.get("GB10_ELEVATE_URL", "the dashboard")
+        print(f"not elevated. To get sudo for up to {r['max_minutes']} minutes, open {url} and use the Elevate card (two-factor sign-in, a reason is required).")
+    else:
+        print("not elevated, and your account is not allowed to elevate (admins only).")
+
+
+if __name__ == "__main__":
+    main()

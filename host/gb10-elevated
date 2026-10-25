@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""gb10-elevated: temporary, audited sudo for admins' browser-terminal accounts. Runs as root (systemd unit gb10-elevated.service).
+
+A grant is a file /etc/sudoers.d/gb10-grant-<uid> that gives ONE existing account sudo (with full input/output recording by sudo) until it expires.
+Who can create one:
+  web.sock   the dashboard (a Unix socket owned by the dashboard container's uid, mode 0600). The dashboard has already made the person pass
+             Authelia's two-factor check and sends their name; this daemon still checks that the name is an enabled admin in users.yml and
+             has a browser-terminal account. Operations: grant, drop, status, events, sessions, export.
+  user.sock  any local account, for ITSELF only (identity from SO_PEERCRED). Operations: status, drop. It can never grant.
+Everything is logged to /var/log/gb10-elevate/grants-YYYY-MM-DD.jsonl (append-only attribute set) and to the journal. sudo's own recordings go
+to /var/log/sudo-io (replay with sudoreplay). Both are kept for GB10_ELEVATE_KEEP_DAYS (30) and then deleted by this daemon.
+
+Expiry: a thread checks every 5 s, and `gb10-elevated --sweep` (run by a systemd timer every minute) does the same if the daemon is down. When a
+grant ends the file is removed and every process of that person that runs as root is ended (SIGHUP, then SIGKILL after 5 s), found through
+/proc/<pid>/loginuid, which the login keeps for the whole session.
+Only the standard library plus PyYAML (already required by sync-accounts.sh).
+"""
+import grp
+import json
+import os
+import pwd
+import re
+import shutil
+import socket
+import socketserver
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Everything below can be redirected with environment variables so the daemon can be tested without root (GB10_ELEVATE_TEST=1).
+TEST = bool(os.environ.get("GB10_ELEVATE_TEST"))
+RUN_DIR = Path(os.environ.get("GB10_ELEVATE_RUN", "/run/gb10-elevate"))
+LOG_DIR = Path(os.environ.get("GB10_ELEVATE_LOG", "/var/log/gb10-elevate"))
+IO_DIR = Path(os.environ.get("GB10_ELEVATE_IOLOG", "/var/log/sudo-io"))
+SUDOERS_DIR = Path(os.environ.get("GB10_ELEVATE_SUDOERS", "/etc/sudoers.d"))
+STATE_DIR = Path(os.environ.get("GB10_ELEVATE_STATE", str(RUN_DIR)))      # grants.json: survives a daemon restart, not a reboot (grants do not either)
+USERS_YML = Path(os.environ.get("GB10_USERS_YML", "/etc/gb10/users.yml"))
+WEB_UID = int(os.environ.get("GB10_ELEVATE_WEB_UID", "10001"))             # the dashboard container's user
+DEFAULT_MIN = int(os.environ.get("GB10_ELEVATE_DEFAULT_MIN", "15"))
+MAX_MIN = int(os.environ.get("GB10_ELEVATE_MAX_MIN", "60"))
+KEEP_DAYS = int(os.environ.get("GB10_ELEVATE_KEEP_DAYS", "30"))
+GROUP = "gb10-users"
+UID_MIN, UID_MAX = 20000, 29999
+NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{1,31}$")
+SESSION_RE = re.compile(r"^[0-9A-Z]{2}/[0-9A-Z]{2}/[0-9A-Z]{2}$")
+FILE_RE = re.compile(r"^grants-(\d{4}-\d{2}-\d{2})\.jsonl$")
+GRANT_MARK = "# gb10-grant"
+
+_lock = threading.RLock()
+_grants: dict[str, dict] = {}       # user -> {id, user, uid, reason, started, expires, ip, by}
+
+
+class Refused(Exception):
+    pass
+
+
+# ─────────────────────────── logging ───────────────────────────
+
+def log_event(event: str, **fields) -> dict:
+    rec = {"ts": round(time.time(), 3), "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "event": event, **fields}
+    line = json.dumps(rec, separators=(",", ":"), ensure_ascii=True)
+    print(line, flush=True)                                  # journald
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / f"grants-{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
+    new = not path.exists()
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    if new:
+        os.chmod(path, 0o640)
+        set_append_only(path, True)
+    return rec
+
+
+def set_append_only(path: Path, on: bool) -> None:
+    if TEST:
+        return
+    subprocess.run(["chattr", "+a" if on else "-a", str(path)], check=False, capture_output=True)
+
+
+# ─────────────────────────── who may elevate ───────────────────────────
+
+def admins() -> set[str]:
+    import yaml
+    data = yaml.safe_load(USERS_YML.read_text()) or {}
+    out = set()
+    for name, u in (data.get("users") or {}).items():
+        if not u.get("disabled") and "admins" in (u.get("groups") or []) and NAME_RE.match(str(name)):
+            out.add(str(name))
+    return out
+
+
+def account(user: str) -> pwd.struct_passwd:
+    """The browser-terminal account for `user`; refuses anything else (root, the machine's own admin, a name outside our uid range)."""
+    if not NAME_RE.match(user or ""):
+        raise Refused("invalid user name")
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        raise Refused(f"{user} has no account on this machine yet (the account sync runs every 5 minutes)")
+    if TEST:
+        return pw
+    if not (UID_MIN <= pw.pw_uid <= UID_MAX):
+        raise Refused(f"{user} is not a browser-terminal account")
+    try:
+        if user not in grp.getgrnam(GROUP).gr_mem:
+            raise Refused(f"{user} is not in {GROUP}")
+    except KeyError:
+        raise Refused(f"group {GROUP} does not exist")
+    return pw
+
+
+# ─────────────────────────── grants ───────────────────────────
+
+def grant_path(uid: int) -> Path:
+    return SUDOERS_DIR / f"gb10-grant-{uid}"            # by uid: account names may contain dots, which sudo ignores in file names
+
+
+def save_state() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_DIR / "grants.json.tmp"
+    tmp.write_text(json.dumps(_grants))
+    os.replace(tmp, STATE_DIR / "grants.json")
+
+
+def load_state() -> None:
+    """After a restart, pick up the grants that are still on disk; a grant file without a record is removed (it has no known expiry)."""
+    try:
+        saved = json.loads((STATE_DIR / "grants.json").read_text())
+    except (OSError, ValueError):
+        saved = {}
+    with _lock:
+        for user, g in saved.items():
+            if isinstance(g, dict) and grant_path(g.get("uid", -1)).exists():
+                _grants[user] = g
+        known = {grant_path(g["uid"]).name for g in _grants.values()}
+        for f in SUDOERS_DIR.glob("gb10-grant-*"):
+            if f.name not in known:
+                f.unlink(missing_ok=True)
+                log_event("removed_orphan", file=f.name)
+        save_state()
+
+
+def write_grant_file(g: dict) -> None:
+    body = (
+        f"{GRANT_MARK} id={g['id']} user={g['user']} expires={int(g['expires'])}\n"
+        f"Defaults:{g['user']} log_input, log_output, iolog_dir={IO_DIR}, !lecture\n"
+        f"{g['user']} ALL=(ALL:ALL) NOPASSWD: ALL\n"          # accounts have no password; the 2FA at the dashboard was the authentication
+    )
+    SUDOERS_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".gb10-grant-", dir=SUDOERS_DIR)           # leading dot: sudo ignores it while it is being checked
+    try:
+        os.write(fd, body.encode())
+        os.fchmod(fd, 0o440)
+        os.close(fd)
+        if not TEST:
+            chk = subprocess.run(["visudo", "-cf", tmp], capture_output=True, text=True)
+            if chk.returncode != 0:
+                raise Refused("sudoers check failed: " + chk.stdout.strip()[-200:])
+        os.replace(tmp, grant_path(g["uid"]))
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def public(g: dict) -> dict:
+    return {k: g[k] for k in ("id", "user", "reason", "started", "expires", "ip", "by")} | {"remaining": max(0, int(g["expires"] - time.time()))}
+
+
+def grant(user: str, reason: str, minutes, by: str, ip: str) -> dict:
+    if user not in admins():
+        log_event("denied", user=user, by=by, ip=ip, why="not an admin")
+        raise Refused("only admins can elevate")
+    pw = account(user)
+    reason = (reason or "").strip()
+    if not (5 <= len(reason) <= 200) or re.search(r"[\x00-\x1f\x7f]", reason):
+        raise Refused("give a reason of 5 to 200 characters")
+    try:
+        minutes = int(minutes or DEFAULT_MIN)
+    except (TypeError, ValueError):
+        raise Refused("minutes must be a number")
+    if not (1 <= minutes <= MAX_MIN):
+        raise Refused(f"minutes must be between 1 and {MAX_MIN}")
+    with _lock:
+        if user in _grants:
+            raise Refused("already elevated; drop the current elevation first")
+        now = time.time()
+        g = {"id": f"{int(now)}-{pw.pw_uid}", "user": user, "uid": pw.pw_uid, "reason": reason, "started": int(now),
+             "expires": int(now + minutes * 60), "ip": str(ip)[:64], "by": by}
+        write_grant_file(g)
+        _grants[user] = g
+        save_state()
+    log_event("grant", id=g["id"], user=user, reason=reason, minutes=minutes, expires=g["expires"], ip=g["ip"], by=by)
+    return public(g)
+
+
+def end_grant(user: str, why: str, by: str = "") -> bool:
+    with _lock:
+        g = _grants.pop(user, None)
+        if not g:
+            return False
+        grant_path(g["uid"]).unlink(missing_ok=True)
+        save_state()
+    killed = kill_root_processes(g["uid"])
+    log_event(why, id=g["id"], user=user, by=by or user, killed=killed, seconds=int(time.time() - g["started"]))
+    return True
+
+
+def kill_root_processes(uid: int) -> int:
+    """End everything that runs as root on behalf of this login (sudo -s, sudo -i, a command started under sudo)."""
+    if TEST:
+        return 0
+
+    def victims() -> list[int]:
+        out = []
+        for p in Path("/proc").iterdir():
+            if not p.name.isdigit():
+                continue
+            try:
+                if int((p / "loginuid").read_text()) != uid:
+                    continue
+                if (p.stat().st_uid) == 0:
+                    out.append(int(p.name))
+            except (OSError, ValueError):
+                pass
+        return out
+
+    first = victims()
+    for pid in first:
+        try:
+            os.kill(pid, 1)       # SIGHUP: a shell hangs up its jobs
+        except OSError:
+            pass
+    if first:
+        time.sleep(5)
+        for pid in victims():
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+    return len(first)
+
+
+def sweep() -> None:
+    now = time.time()
+    with _lock:
+        due = [u for u, g in _grants.items() if g["expires"] <= now]
+    for u in due:
+        end_grant(u, "expire")
+    # grant files the daemon does not know about (daemon was down) are judged by the expiry written in them
+    for f in SUDOERS_DIR.glob("gb10-grant-*"):
+        try:
+            m = re.search(r"expires=(\d+)", f.read_text().splitlines()[0])
+            if m and int(m.group(1)) <= now and not any(grant_path(g["uid"]) == f for g in _grants.values()):
+                f.unlink(missing_ok=True)
+                killed = kill_root_processes(int(f.name.rsplit("-", 1)[1]))
+                log_event("expire", file=f.name, killed=killed, note="removed by sweep")
+        except (OSError, IndexError):
+            pass
+
+
+def prune() -> None:
+    cutoff = time.time() - KEEP_DAYS * 86400
+    if LOG_DIR.exists():
+        for f in LOG_DIR.iterdir():
+            m = FILE_RE.match(f.name)
+            if m and datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() < cutoff:
+                set_append_only(f, False)
+                f.unlink(missing_ok=True)
+    for d in session_dirs():
+        marker = d / "log.json" if (d / "log.json").exists() else d / "log"
+        try:
+            if marker.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+
+# ─────────────────────────── reading the logs back ───────────────────────────
+
+def read_events(days: int) -> list[dict]:
+    out = []
+    since = time.time() - days * 86400
+    for f in sorted(LOG_DIR.glob("grants-*.jsonl")) if LOG_DIR.exists() else []:
+        for line in f.read_text(errors="replace").splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("ts", 0) >= since:
+                out.append(rec)
+    return out
+
+
+def session_dirs() -> list[Path]:
+    out = []
+    if not IO_DIR.exists():
+        return out
+    for a in IO_DIR.iterdir():
+        for b in (a.iterdir() if a.is_dir() and len(a.name) == 2 else []):
+            for c in (b.iterdir() if b.is_dir() and len(b.name) == 2 else []):
+                if c.is_dir() and len(c.name) == 2:
+                    out.append(c)
+    return out
+
+
+def read_session(d: Path) -> dict | None:
+    """One sudo recording. sudo 1.9.13+ writes `log.json`, older versions a 3-line `log` file."""
+    sid = f"{d.parent.parent.name}/{d.parent.name}/{d.name}"
+    try:
+        if (d / "log.json").exists():
+            j = json.loads((d / "log.json").read_text())
+            return {"id": sid, "time": int(j.get("submit_time", {}).get("seconds", 0)), "user": j.get("submituser"),
+                    "runas": j.get("runuser"), "cwd": j.get("submitcwd"), "command": j.get("command"), "tty": j.get("ttyname")}
+        lines = (d / "log").read_text(errors="replace").splitlines()
+        t, user, runas, _g, tty = lines[0].split(":")[:5]
+        return {"id": sid, "time": int(t), "user": user, "runas": runas, "cwd": lines[1], "command": lines[2], "tty": tty}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_sessions(days: int) -> list[dict]:
+    since = time.time() - days * 86400
+    rows = [s for s in (read_session(d) for d in session_dirs()) if s and s["time"] >= since]
+    return sorted(rows, key=lambda s: -s["time"])
+
+
+def make_export(kind: str, sid: str | None) -> Path:
+    """A .tar.gz in a temp file. `sudo-io/...` inside it is a directory sudoreplay can read: sudoreplay -d sudo-io <session>."""
+    tmp = Path(tempfile.mkstemp(prefix="gb10-export-", suffix=".tar.gz", dir=RUN_DIR)[1])
+    with tarfile.open(tmp, "w:gz") as tar:
+        if kind in ("all", "log"):
+            for f in sorted(LOG_DIR.glob("grants-*.jsonl")) if LOG_DIR.exists() else []:
+                tar.add(f, arcname=f"gb10-elevate/{f.name}")
+        if kind == "all":
+            for d in session_dirs():
+                tar.add(d, arcname=f"sudo-io/{d.parent.parent.name}/{d.parent.name}/{d.name}")
+        elif kind == "session":
+            if not sid or not SESSION_RE.match(sid):
+                raise Refused("invalid session id")
+            d = IO_DIR / sid
+            if not d.is_dir():
+                raise Refused("no such session")
+            tar.add(d, arcname=f"sudo-io/{sid}")
+    return tmp
+
+
+# ─────────────────────────── sockets ───────────────────────────
+
+def peer_uid(conn: socket.socket) -> int:
+    pid, uid, gid = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+    return uid
+
+
+class Handler(socketserver.StreamRequestHandler):
+    kind = ""            # "web" or "user"
+
+    def reply(self, obj: dict) -> None:
+        self.wfile.write(json.dumps(obj).encode() + b"\n")
+
+    def handle(self) -> None:
+        self.request.settimeout(10)
+        try:
+            req = json.loads(self.rfile.readline(65536) or b"{}")
+            if not isinstance(req, dict):
+                raise Refused("bad request")
+            op = req.get("op")
+            if self.kind == "user":
+                self.handle_user(op)
+            else:
+                self.handle_web(op, req)
+        except Refused as e:
+            self.reply({"ok": False, "error": str(e)})
+        except Exception as e:
+            print(f"gb10-elevated: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            self.reply({"ok": False, "error": "internal error (see the journal: journalctl -u gb10-elevated)"})
+
+    def handle_user(self, op: str) -> None:
+        uid = peer_uid(self.request)
+        try:
+            name = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            raise Refused("unknown account")
+        if not TEST and not (UID_MIN <= uid <= UID_MAX):
+            raise Refused("only browser-terminal accounts use this")
+        if op == "status":
+            with _lock:
+                g = _grants.get(name)
+            self.reply({"ok": True, "grant": public(g) if g else None, "max_minutes": MAX_MIN, "default_minutes": DEFAULT_MIN,
+                        "admin": name in admins()})
+        elif op == "drop":
+            self.reply({"ok": True, "dropped": end_grant(name, "drop", by=name)})
+        else:
+            raise Refused("unknown operation (status, drop)")
+
+    def handle_web(self, op: str, req: dict) -> None:
+        if not TEST and peer_uid(self.request) not in (WEB_UID, 0):
+            raise Refused("not the dashboard")
+        user = str(req.get("user", ""))
+        if op == "status":
+            with _lock:
+                mine = _grants.get(user)
+                allg = [public(g) for g in _grants.values()]
+            self.reply({"ok": True, "grant": public(mine) if mine else None, "grants": allg, "max_minutes": MAX_MIN,
+                        "default_minutes": DEFAULT_MIN, "keep_days": KEEP_DAYS, "can": user in admins()})
+        elif op == "grant":
+            self.reply({"ok": True, "grant": grant(user, req.get("reason"), req.get("minutes"), by=f"dashboard:{user}", ip=req.get("ip", ""))})
+        elif op == "drop":
+            if user not in admins():
+                raise Refused("only admins can elevate")
+            self.reply({"ok": True, "dropped": end_grant(user, "drop", by=f"dashboard:{user}")})
+        elif op == "events":
+            if user not in admins():
+                raise Refused("admins only")
+            self.reply({"ok": True, "events": read_events(KEEP_DAYS)[-300:][::-1]})
+        elif op == "sessions":
+            if user not in admins():
+                raise Refused("admins only")
+            self.reply({"ok": True, "sessions": read_sessions(KEEP_DAYS)[:300]})
+        elif op == "export":
+            if user not in admins():
+                raise Refused("admins only")
+            path = make_export(str(req.get("kind", "")), req.get("id"))
+            try:
+                log_event("export", user=user, kind=req.get("kind"), id=req.get("id"))
+                self.reply({"ok": True, "size": path.stat().st_size})
+                with open(path, "rb") as f:
+                    shutil.copyfileobj(f, self.wfile)
+            finally:
+                path.unlink(missing_ok=True)
+        else:
+            raise Refused("unknown operation")
+
+
+class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def serve(path: Path, kind: str, mode: int, owner: int | None) -> UnixServer:
+    path.unlink(missing_ok=True)
+    handler = type(f"{kind.title()}Handler", (Handler,), {"kind": kind})
+    srv = UnixServer(str(path), handler)
+    os.chmod(path, mode)
+    if owner is not None and not TEST:
+        os.chown(path, owner, -1)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def main() -> None:
+    if "--sweep" in sys.argv:
+        sweep()
+        return
+    if not TEST and os.geteuid() != 0:
+        sys.exit("gb10-elevated must run as root")
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(RUN_DIR, 0o755)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(LOG_DIR, 0o750)
+    IO_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(IO_DIR, 0o700)
+    load_state()
+    serve(RUN_DIR / "web.sock", "web", 0o600, WEB_UID)
+    serve(RUN_DIR / "user.sock", "user", 0o666, None)
+    log_event("start", grants=len(_grants))
+    last_prune = 0.0
+    while True:
+        try:
+            sweep()
+            if time.time() - last_prune > 3600:
+                prune()
+                last_prune = time.time()
+        except Exception as e:
+            print(f"gb10-elevated: sweep failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()

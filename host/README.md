@@ -35,6 +35,26 @@ no docker, password `*`, home mode 750, and limits through `user-<uid>.slice` (d
   account can still log in with a certificate. (With `UsePAM no` it is the other way round and a locked account refuses certificate logins: that is why the
   accounts use the password field `*`.)
 
+## Temporary sudo (admins only)
+
+Accounts have no sudo. An admin can get it for a short time from the dashboard (`/home/`, **Temporary sudo** card: a reason of 5-200 characters and 5/15/30/60 minutes;
+the page is behind Authelia two-factor, nobody else has to approve). Install: `sudo bash host/elevate-setup.sh` (then `docker compose up -d --build admin-dashboard`).
+
+- A grant is one file, `/etc/sudoers.d/gb10-grant-<uid>`, checked with `visudo -cf` before it goes live. It lasts until it expires or the person presses **End now** /
+  types `gb10-elevate drop`; then the file is removed and every root process of that login (`sudo -s`, `sudo -i`, a command under sudo) gets SIGHUP, and SIGKILL 5 s later.
+  The daemon checks every 5 s; a systemd timer does the same every minute if the daemon is down; after a reboot leftover grant files are deleted.
+- Only enabled members of `admins` in `users.yml` with a browser-terminal account can be granted, and the daemon checks that itself; the dashboard only passes the signed-in name on.
+  The root daemon listens on two sockets in `/run/gb10-elevate`: `web.sock` (owner = the dashboard container's uid 10001, mode 0600) and `user.sock` (any account, but only
+  `status` and `drop` for itself, identified by SO_PEERCRED). `gb10-elevate` in the terminal is the client of the second one and cannot grant.
+- Audit, kept 30 days (`GB10_ELEVATE_KEEP_DAYS` in `/etc/gb10/elevate.env`, pruned hourly): the grant log `/var/log/gb10-elevate/grants-YYYY-MM-DD.jsonl` (who, when, reason, minutes,
+  source address, how it ended; append-only attribute set), sudo's full input/output recordings in `/var/log/sudo-io` (replay: unpack the download, `sudoreplay -d sudo-io <id>`),
+  sudo's normal syslog lines, and an auditd rule (`sudo ausearch -k gb10-elevated -i`) for every program run as root by a browser-terminal login. The dashboard card lists events and
+  recorded commands and has download links (grant log, everything, one recording).
+- Limits: root can remove its own traces (`chattr -a`, deleting recordings), so this is a deterrent plus a record, not tamper-proof; copy the logs off the machine if you need that.
+  A root process that outlives the grant on purpose (a container started with `docker run -d`, a cron job, a changed file) is not stopped: read the recording. Root also bypasses the
+  per-user network block (it matches uids 20000-29999) and can read every secret on the machine, so give it only to people you would give the machine to.
+- Remove: `sudo bash host/elevate-setup.sh --uninstall` (logs and `/etc/gb10/elevate.env` are kept).
+
 ## Check it works
 
 ```bash

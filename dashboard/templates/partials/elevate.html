@@ -1,0 +1,62 @@
+<div class="card">
+  <h2>Temporary sudo</h2>
+  {% if error %}
+    <p><span class="dot bad"></span>{{ error }}</p>
+  {% else %}
+    {% if notice %}<p><span class="dot warn"></span>{{ notice }}</p>{% endif %}
+    <div class="stats" style="margin: 0 0 14px; align-items: center">
+      {% if st.grant %}
+        <div><span class="dot warn"></span><b>You have sudo</b> for another <b>{{ st.grant.remaining // 60 }} min {{ '%02d' % (st.grant.remaining % 60) }} s</b> · <small>{{ st.grant.reason }}</small></div>
+        <button hx-post="api/elevate/drop" hx-target="#elevate">End now</button>
+      {% else %}
+        <form hx-post="api/elevate/grant" hx-target="#elevate" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0">
+          <input name="reason" required minlength="5" maxlength="200" placeholder="Why do you need sudo?" size="40"
+                 style="background:#0b1020; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:5px 10px; font:inherit">
+          <select name="minutes" style="background:#0b1020; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:5px 8px; font:inherit">
+            {% for m in (5, 15, 30, 60) if m <= st.max_minutes %}<option value="{{ m }}" {{ 'selected' if m == st.default_minutes }}>{{ m }} min</option>{% endfor %}
+          </select>
+          <button type="submit">Get sudo in the terminal</button>
+        </form>
+      {% endif %}
+    </div>
+    <small>Everything done with sudo is recorded (keystrokes and output) and kept {{ st.keep_days }} days. Access ends by itself; running root processes are stopped then.</small>
+
+    {% if st.grants | length > (1 if st.grant else 0) %}
+    <table style="margin-top: 14px">
+      <thead><tr><th>Elevated now</th><th>Reason</th><th>Left</th><th></th></tr></thead>
+      <tbody>{% for g in st.grants %}<tr><td>{{ g.user }}</td><td>{{ g.reason }}</td><td>{{ g.remaining // 60 }}m {{ '%02d' % (g.remaining % 60) }}s</td>
+        <td>{% if g.user != who.user %}<small>from {{ g.ip or '—' }}</small>{% endif %}</td></tr>{% endfor %}</tbody>
+    </table>
+    {% endif %}
+
+    <details style="margin-top: 14px" {{ 'open' if open_log }}>
+      <summary style="cursor:pointer; color:var(--muted)">Audit log ({{ events | length }} events, {{ sessions | length }} recorded commands)</summary>
+      <div class="quick" style="margin: 10px 0">
+        <a href="api/elevate/export/log">Download grant log</a>
+        <a href="api/elevate/export/all">Download everything (log + recordings)</a>
+        <small>Recordings replay with <code>sudoreplay -d sudo-io &lt;id&gt;</code> after unpacking.</small>
+      </div>
+      <table>
+        <thead><tr><th>Time (UTC)</th><th>Event</th><th>Who</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for e in events if e.event in ('grant', 'drop', 'expire', 'denied', 'export') %}
+          <tr><td>{{ e.time }}</td><td>{{ e.event }}</td><td>{{ e.user or '—' }}</td>
+              <td><small>{% if e.event == 'grant' %}{{ e.minutes }} min · {{ e.reason }} · from {{ e.ip or '—' }}{% elif e.event in ('drop', 'expire') %}after {{ (e.seconds or 0) // 60 }}m{{ (e.seconds or 0) % 60 }}s{% if e.killed %} · ended {{ e.killed }} root process(es){% endif %}{% elif e.event == 'denied' %}{{ e.why }}{% elif e.event == 'export' %}{{ e.kind }}{% endif %}</small></td></tr>
+        {% else %}<tr><td colspan="4" style="color:var(--muted)">No events yet</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <table style="margin-top: 14px">
+        <thead><tr><th>Time</th><th>Who</th><th>Command run with sudo</th><th></th></tr></thead>
+        <tbody>
+        {% for s in sessions %}
+          <tr><td>{{ s.time | stamp }}</td><td>{{ s.user }}{% if s.runas and s.runas != 'root' %} → {{ s.runas }}{% endif %}</td>
+              <td><code style="word-break:break-all">{{ s.command }}</code><br><small>{{ s.cwd }}</small></td>
+              <td><a href="api/elevate/export/session?id={{ s.id }}">Download</a></td></tr>
+        {% else %}<tr><td colspan="4" style="color:var(--muted)">No sudo commands recorded yet</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  {% endif %}
+</div>

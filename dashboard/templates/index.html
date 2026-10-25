@@ -118,6 +118,7 @@
     </div>
     {% if who.admin %}
     <div id="devices" hx-get="partials/devices" hx-trigger="load, every 10s" hx-swap="innerHTML"></div>
+    <div id="elevate" hx-get="partials/elevate" hx-trigger="load, every 10s [!document.querySelector('#elevate details[open], #elevate input:focus')]" hx-swap="innerHTML"></div>
     {% endif %}
   </main>
 </body>

@@ -12,11 +12,12 @@ from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import devices
+import elevate
 
 LLAMA_SWAP_URL = os.environ.get("LLAMA_SWAP_URL", "http://model-runner:8000")
 COMFY_URL = os.environ.get("COMFY_URL", "http://comfyui:8188")
@@ -219,6 +220,7 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 templates.env.filters["ago"] = devices.ago
 templates.env.filters["short"] = devices.short
+templates.env.filters["stamp"] = lambda t: time.strftime("%Y-%m-%d %H:%M", time.gmtime(t))
 
 
 # ─────────────────────────── routes ───────────────────────────
@@ -351,6 +353,65 @@ async def enrollment_close(request: Request):
     who = require_admin(request)
     devices.close_window(who["user"])
     return await devices_partial(request)
+
+
+
+# ─────────────────────────── temporary sudo ───────────────────────────
+
+async def elevate_partial(request: Request, notice: str | None = None, open_log: bool = False) -> HTMLResponse:
+    who = require_admin(request)
+    ctx = {"who": who, "error": None, "notice": notice, "open_log": open_log, "st": {}, "events": [], "sessions": []}
+    try:
+        ctx["st"] = await elevate.call("status", user=who["user"])
+        ctx["events"] = (await elevate.call("events", user=who["user"]))["events"]
+        ctx["sessions"] = (await elevate.call("sessions", user=who["user"]))["sessions"]
+    except elevate.ElevateError as exc:
+        ctx["error"] = str(exc)
+    return templates.TemplateResponse(request, "partials/elevate.html", ctx)
+
+
+@app.get("/partials/elevate", response_class=HTMLResponse)
+async def elevate_view(request: Request):
+    return await elevate_partial(request)
+
+
+@app.post("/api/elevate/grant", response_class=HTMLResponse)
+async def elevate_grant(request: Request):
+    who = require_admin(request)
+    if request.headers.get("HX-Request") != "true":      # a custom header: a form posted from another site cannot send it
+        raise HTTPException(400, "Use the dashboard")
+    form = await request.form()
+    ip = (request.headers.get("X-Forwarded-For") or (request.client.host if request.client else "")).split(",")[0].strip()
+    try:
+        await elevate.call("grant", user=who["user"], reason=str(form.get("reason", "")), minutes=str(form.get("minutes", "")), ip=ip)
+    except elevate.ElevateError as exc:
+        return await elevate_partial(request, notice=str(exc))
+    return await elevate_partial(request)
+
+
+@app.post("/api/elevate/drop", response_class=HTMLResponse)
+async def elevate_drop(request: Request):
+    who = require_admin(request)
+    if request.headers.get("HX-Request") != "true":
+        raise HTTPException(400, "Use the dashboard")
+    try:
+        await elevate.call("drop", user=who["user"])
+    except elevate.ElevateError as exc:
+        return await elevate_partial(request, notice=str(exc))
+    return await elevate_partial(request)
+
+
+@app.get("/api/elevate/export/{kind}")
+async def elevate_export(kind: str, request: Request, id: str | None = None):
+    who = require_admin(request)
+    if kind not in ("log", "all", "session"):
+        raise HTTPException(404, "Unknown export")
+    try:
+        body = await elevate.export(who["user"], kind, id)
+    except elevate.ElevateError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    name = "gb10-sudo-" + (id.replace("/", "") if kind == "session" and id else kind) + f"-{time.strftime('%Y%m%d', time.gmtime())}.tar.gz"
+    return StreamingResponse(body, media_type="application/gzip", headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
 
 
 @app.get("/connect")

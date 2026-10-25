@@ -1,0 +1,3 @@
+## (64-bit only; this machine is arm64.) Every program a browser-terminal account runs as root (that is: under an elevation), tied to the login, not to root.
+## auid is the login uid that sshd's PAM stack sets and keeps across sudo. Search with: sudo ausearch -k gb10-elevated -i
+-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=20000 -F auid<=29999 -k gb10-elevated
