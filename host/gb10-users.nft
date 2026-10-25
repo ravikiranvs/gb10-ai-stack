@@ -1,7 +1,7 @@
 # Per-user network block for the people who get shell accounts (uids 20000-29999). Everything the stack trusts is reachable from the
 # machine itself (loopback ports that trust Authelia's headers, ComfyUI, Portainer, Docker's networks); these accounts must not reach any
 # of it. They keep the internet, DNS, and the stack's front door (Caddy on 127.0.0.1:9080), which authenticates every request itself.
-# Blocked traffic is dropped, so a refused connection shows up as a timeout, not an immediate error.
+# Blocked traffic is dropped, so a refused connection shows up as a timeout, not an immediate error. (TCP resets are let through: they carry no uid.)
 table inet gb10_users		# these two lines make loading the file again replace the table instead of failing
 delete table inet gb10_users
 table inet gb10_users {
@@ -9,6 +9,7 @@ table inet gb10_users {
 		type filter hook output priority filter; policy accept;
 		meta skuid < 20000 accept
 		meta skuid > 29999 accept
+		tcp flags rst accept                                 # the kernel's own answer to a connection on a closed port has no uid; dropping it made every closed local port hang for everyone, not refuse
 		udp dport 53 accept                                  # the local resolver (systemd-resolved on 127.0.0.53)
 		tcp dport 53 accept
 		ip daddr 127.0.0.1 tcp dport 9080 accept             # Caddy: authenticates every request itself
