@@ -1,15 +1,17 @@
 <div class="card">
   <h2>Models</h2>
+  <p style="margin:0 0 12px"><small>API base URL <button class="copy" data-copy="{{ s.api_base }}">{{ s.api_base }}</button> · pass a name from the <b>Use as</b> column as <code>model</code> (click to copy)</small></p>
   <table>
-    <thead><tr><th>Model</th><th>State</th><th>Idle</th><th></th></tr></thead>
+    <thead><tr><th>Model</th><th>Use as</th><th>State</th><th>Idle</th><th></th></tr></thead>
     <tbody>
     {% if not s.model_runner_reachable %}
-      <tr><td colspan="4"><span class="dot bad"></span>model-runner unreachable</td></tr>
+      <tr><td colspan="5"><span class="dot bad"></span>model-runner unreachable</td></tr>
     {% endif %}
     {% for model in s.models %}
       {% set st = model.state %}
       <tr>
         <td>{{ model.name }}<br><small>{{ model.id }}</small></td>
+        <td>{% for n in s.api_names.get(model.id, []) %}<button class="copy" data-copy="{{ n }}">{{ n }}</button> {% else %}<small>—</small>{% endfor %}</td>
         <td><span class="pill {{ 'ok-p' if st == 'ready' else ('warn-p' if st in ['starting', 'stopping'] else '') }}"><span class="dot {{ 'ok' if st == 'ready' else ('warn' if st in ['starting', 'stopping'] else '') }}"></span>{{ st }}</span></td>
         <td>—</td>
         <td>
@@ -27,6 +29,7 @@
     {% set im = s.image %}
       <tr>
         <td>Image · ComfyUI<br><small>flux-schnell workflow</small></td>
+        <td><small>— (not behind LiteLLM; agents use the <code>comfy_image</code> tool)</small></td>
         <td>
           {% if not im.reachable %}<span class="pill bad-p"><span class="dot bad"></span>unreachable</span>
           {% else %}<span class="pill {{ 'ok-p' if im.state in ['hot', 'busy'] else '' }}"><span class="dot {{ 'ok' if im.state in ['hot', 'busy'] else '' }}"></span>{{ im.state }}</span>{% endif %}
@@ -42,6 +45,7 @@
     {% set tts = s.tts %}
       <tr>
         <td>Speech · Kokoro<br><small>kokoro · text to speech, CPU, always on</small></td>
+        <td>{% for n in s.api_names.get('kokoro', []) %}<button class="copy" data-copy="{{ n }}">{{ n }}</button> {% else %}<small>—</small>{% endfor %}</td>
         <td>
           {% if not tts %}<span class="pill bad-p"><span class="dot bad"></span>not found</span>
           {% elif tts.state == 'running' and 'unhealthy' not in (tts.status or '') and 'starting' not in (tts.status or '') %}<span class="pill ok-p"><span class="dot ok"></span>ready</span>

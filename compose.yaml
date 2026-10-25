@@ -408,6 +408,7 @@ services:
     secrets: [bridge_dashboard_token]
     volumes:
       - ./comfyui/workflows:/app/workflows:ro
+      - ./litellm/config.yaml:/app/litellm.yaml:ro   # the model names shown on the Models tab
       - /run/gb10-elevate:/run/gb10-elevate   # web.sock of the root daemon behind the Elevate card (host/elevate-setup.sh); only this container's uid can open it
     depends_on:
       ops-bridge:

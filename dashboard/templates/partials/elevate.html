@@ -11,8 +11,8 @@
       {% else %}
         <form hx-post="api/elevate/grant" hx-target="#elevate" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0">
           <input name="reason" required minlength="5" maxlength="200" placeholder="Why do you need sudo?" size="40"
-                 style="background:#0b1020; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:5px 10px; font:inherit">
-          <select name="minutes" style="background:#0b1020; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:5px 8px; font:inherit">
+                >
+          <select name="minutes">
             {% for m in (5, 15, 30, 60) if m <= st.max_minutes %}<option value="{{ m }}" {{ 'selected' if m == st.default_minutes }}>{{ m }} min</option>{% endfor %}
           </select>
           <button type="submit">Get sudo in the terminal</button>

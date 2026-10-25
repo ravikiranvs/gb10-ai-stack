@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
+import yaml
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +29,8 @@ PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
 ADMIN_GROUP = os.environ.get("ADMIN_GROUP", "admins")
 USER_GROUP = os.environ.get("USER_GROUP", "users")
 NEMOCLAW_SANDBOX = os.environ.get("NEMOCLAW_SANDBOX", "nemoclaw-assistant")
+LITELLM_CONFIG = Path(os.environ.get("LITELLM_CONFIG", "/app/litellm.yaml"))
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "")
 
 MODEL_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 log = logging.getLogger("dashboard")
@@ -84,6 +87,25 @@ def tiny_workflow() -> dict:
     return wf
 
 
+def litellm_names() -> dict[str, list[str]]:
+    """The model names developers pass to LiteLLM, by the backend model they reach (the id llama-swap or Kokoro serves),
+    read from litellm/config.yaml: {"qwen3.6-35b": ["qwen3.6-35b", "agent"], "kokoro": ["kokoro", "tts-1"], ...}."""
+    try:
+        cfg = yaml.safe_load(LITELLM_CONFIG.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    by_group: dict[str, str] = {}
+    out: dict[str, list[str]] = {}
+    for m in cfg.get("model_list") or []:
+        backend = str((m.get("litellm_params") or {}).get("model", "")).split("/", 1)[-1]
+        by_group[m["model_name"]] = backend
+        out.setdefault(backend, []).append(m["model_name"])
+    for alias, group in ((cfg.get("router_settings") or {}).get("model_group_alias") or {}).items():
+        if group in by_group:
+            out[by_group[group]].append(alias)
+    return out
+
+
 # ─────────────────────────── status ───────────────────────────
 
 async def collect_status() -> dict:
@@ -136,6 +158,8 @@ async def collect_status() -> dict:
     gib = 1024 ** 3
     return {
         "models": llm,
+        "api_names": litellm_names(),
+        "api_base": f"https://{PUBLIC_HOST}/llm/v1" if PUBLIC_HOST else "/llm/v1",
         "model_runner_reachable": models is not None,
         "image": image,
         "services": services,

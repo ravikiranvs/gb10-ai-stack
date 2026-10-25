@@ -1,5 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 140" role="img" aria-label="GB10">
-  <defs><linearGradient id="g"><stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>
-  <rect width="140" height="140" rx="35" fill="url(#g)"/>
-  <text x="70" y="70" text-anchor="middle" dominant-baseline="central" font-family="DejaVu Sans, Verdana, sans-serif" font-weight="700" font-size="44" fill="#0b1020">GB10</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 140" role="img" aria-label="gb10">
+  <rect width="140" height="140" fill="#f4f4f0"/>
+  <text x="70" y="70" text-anchor="middle" dominant-baseline="central" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-weight="700" font-size="30" fill="#050505">gb10</text>
 </svg>
