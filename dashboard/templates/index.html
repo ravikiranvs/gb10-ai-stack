@@ -88,6 +88,12 @@
     .stats { display: flex; gap: 24px; flex-wrap: wrap; color: var(--muted); margin-top: 10px; }
     .stats b { color: var(--text); }
     button.htmx-request { opacity: .6; }   /* not on the polled containers: dimming them every 5 s looked like flicker */
+    .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: -6px; overflow-x: auto; }
+    .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 16px; color: var(--muted); white-space: nowrap; }
+    .tabs button:hover { color: var(--text); background: none; }
+    .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+    .panel[hidden] { display: none; }
+    .panel { display: grid; gap: 20px; }
     @media (max-width: 600px) { main { padding: 14px; } header { padding: 10px 14px; } header h1 span { display: none; } }
   </style>
 </head>
@@ -116,10 +122,41 @@
     <div id="status" hx-get="partials/status" hx-trigger="load, every 10s" hx-swap="innerHTML">
       <div class="card">Loading…</div>
     </div>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="models">Models</button>
+      <button role="tab" data-tab="runtime">Agent runtime</button>
+      {% if who.admin %}<button role="tab" data-tab="sudo">Temporary sudo</button>{% endif %}
+    </div>
+    <section class="panel" data-panel="models">
+      <div id="models" hx-get="partials/models" hx-trigger="load, every 10s [tabIs('models')]" hx-swap="innerHTML"></div>
+    </section>
+    <section class="panel" data-panel="runtime">
+      <div id="runtime" hx-get="partials/runtime" hx-trigger="load, every 10s [tabIs('runtime')]" hx-swap="innerHTML"></div>
+      {% if who.admin %}
+      <div id="devices" style="margin-top:20px" hx-get="partials/devices" hx-trigger="load, every 10s [tabIs('runtime')]" hx-swap="innerHTML"></div>
+      {% endif %}
+    </section>
     {% if who.admin %}
-    <div id="devices" hx-get="partials/devices" hx-trigger="load, every 10s" hx-swap="innerHTML"></div>
-    <div id="elevate" hx-get="partials/elevate" hx-trigger="load, every 10s [!document.querySelector('#elevate details[open], #elevate input:focus')]" hx-swap="innerHTML"></div>
+    <section class="panel" data-panel="sudo">
+      <div id="elevate" hx-get="partials/elevate" hx-trigger="load, every 10s [tabIs('sudo') && !document.querySelector('#elevate details[open], #elevate input:focus')]" hx-swap="innerHTML"></div>
+    </section>
     {% endif %}
+    <script>
+      // Tabs: the choice is remembered in the address (#models, #runtime, #sudo); hidden tabs stop polling.
+      var current = "models";
+      function tabIs(name) { return current === name; }
+      function showTab(name) {
+        var tabs = document.querySelectorAll(".tabs [data-tab]");
+        if (![].some.call(tabs, function (b) { return b.dataset.tab === name; })) name = "models";
+        current = name;
+        tabs.forEach(function (b) { b.setAttribute("aria-selected", b.dataset.tab === name); });
+        document.querySelectorAll(".panel").forEach(function (p) { p.hidden = p.dataset.panel !== name; });
+        try { history.replaceState(null, "", "#" + name); } catch (e) {}
+        document.querySelectorAll('.panel:not([hidden]) [hx-get]').forEach(function (el) { htmx.trigger(el, "load"); });
+      }
+      document.querySelectorAll(".tabs [data-tab]").forEach(function (b) { b.addEventListener("click", function () { showTab(b.dataset.tab); }); });
+      showTab(location.hash.slice(1));
+    </script>
   </main>
 </body>
 </html>

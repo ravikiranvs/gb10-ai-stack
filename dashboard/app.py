@@ -236,6 +236,18 @@ async def status_partial(request: Request):
     return templates.TemplateResponse(request, "partials/status.html", {"who": who, "s": await collect_status()})
 
 
+@app.get("/partials/models", response_class=HTMLResponse)
+async def models_partial(request: Request):
+    who = identity(request)
+    return templates.TemplateResponse(request, "partials/models.html", {"who": who, "s": await collect_status()})
+
+
+@app.get("/partials/runtime", response_class=HTMLResponse)
+async def runtime_partial(request: Request):
+    who = identity(request)
+    return templates.TemplateResponse(request, "partials/runtime.html", {"who": who, "s": await collect_status()})
+
+
 @app.get("/api/status")
 async def api_status(request: Request):
     who = identity(request)
@@ -251,7 +263,7 @@ async def model_up(model_id: str, request: Request, tasks: BackgroundTasks):
     if not MODEL_ID.match(model_id):
         raise HTTPException(400, "Invalid model id")
     tasks.add_task(start_model, model_id)
-    return await status_partial(request)
+    return await models_partial(request)
 
 
 @app.post("/api/models/{model_id}/down", response_class=HTMLResponse)
@@ -267,14 +279,14 @@ async def model_down(model_id: str, request: Request):
         raise HTTPException(501, "This llama-swap version has no per-model unload endpoint")
     if r.status_code >= 400:
         raise HTTPException(502, f"llama-swap returned {r.status_code}")
-    return await status_partial(request)
+    return await models_partial(request)
 
 
 @app.post("/api/image/warm", response_class=HTMLResponse)
 async def image_warm(request: Request, tasks: BackgroundTasks):
     require_admin(request)
     tasks.add_task(warm_comfy)
-    return await status_partial(request)
+    return await models_partial(request)
 
 
 @app.post("/api/image/free", response_class=HTMLResponse)
@@ -285,7 +297,7 @@ async def image_free(request: Request):
             await free_comfy(c)
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"ComfyUI /free failed: {exc}") from exc
-    return await status_partial(request)
+    return await models_partial(request)
 
 
 # ─────────────────────────── OpenClaw devices ───────────────────────────

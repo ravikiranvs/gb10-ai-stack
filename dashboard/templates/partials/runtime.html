@@ -1,0 +1,12 @@
+<div class="card">
+  <h2>Agent runtime</h2>
+  <div class="stats">
+    <div>
+      {% if s.sandbox %}
+        <span class="dot {{ 'ok' if s.sandbox.state == 'running' else 'bad' }}"></span>Sandbox {{ s.sandbox.name }} · {{ s.sandbox.status }}
+      {% else %}
+        <span class="dot bad"></span>Sandbox not found
+      {% endif %}
+    </div>
+  </div>
+</div>
