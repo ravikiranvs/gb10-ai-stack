@@ -11,7 +11,7 @@ Planned work that is not part of the current setup. Things still to check are in
 
 ## Access and onboarding
 
-- [ ] **Remove-user script.** `scripts/add-user.sh` has no counterpart: removing someone means editing `users.yml` through the container and pressing Revoke on their devices by hand. A `scripts/remove-user.sh` could do both.
+- [ ] **Remove-user script.** `scripts/add-user.sh` has no counterpart: removing someone means editing `users.yml` through the container, pressing Revoke on their devices, and deleting their LiteLLM key `nb-<login>`, MinIO user and bucket `u-<login>`, notebook volume `jupyter-<login>` and (optionally) their Linux account by hand (README, *Remove a person*). A `scripts/remove-user.sh` could do all of it.
 - [ ] **Dashboard user management** (add/remove users, reset second factors) on top of ops-bridge, so no shell is needed.
 - [ ] **Per-user OpenClaw access.** The gateway token is shared; real per-user tokens or SSO need the NemoClaw change above.
 
@@ -21,6 +21,7 @@ Planned work that is not part of the current setup. Things still to check are in
 - [ ] **Dashboard: real ComfyUI state.** The "hot/unloaded" label is the dashboard's own flag; read ComfyUI's GPU use instead (`/system_stats`).
 - [ ] **Pin the floating base images** (`ubuntu:24.04`, `python:3.12-slim`).
 - [ ] **Image output cleanup.** `data/comfy-output` grows without bound and holds root-owned files.
+- [ ] **Ship the sudo audit off the machine.** Root can erase the grant log and recordings; forwarding them (or the auditd stream) somewhere root on this host cannot reach would make the record tamper-evident.
 - [ ] **Alerts.** None are provisioned. Candidates: GPU temperature, memory headroom, agent model down, gpu-exporter stale, LiteLLM 5xx rate.
 
 ## Observability

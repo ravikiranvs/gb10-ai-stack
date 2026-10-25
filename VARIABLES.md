@@ -62,7 +62,7 @@ docker compose exec -T authelia sh -c 'cat > /config/users.yml' < edited.yml
 | `<username>` | Login name |
 | `displayname`, `email` | Shown in the UI, passed to Grafana. The e-mail receives reset links |
 | `password` | Argon2id hash: `docker run --rm -it authelia/authelia:4.39.28 authelia crypto hash generate argon2` |
-| `groups` | `admins`: everything. `users`: the dashboard landing page (`/home/`, read-only status), `/openclaw`, `/connect`, Grafana (Viewer), Portainer and Jupyter notebooks (own containers). `litellm`: LiteLLM UI SSO, in addition to `users` or `admins`; keep it to 5 people (LiteLLM's free SSO limit) |
+| `groups` | `admins`: everything, including ComfyUI, the dashboard controls and *Temporary sudo*. `users`: the dashboard landing page (`/home/`, read-only status), `/openclaw`, `/connect`, Grafana (Viewer), Portainer and Jupyter notebooks (own containers), Storage (own bucket and `shared`) and the Terminal (own Linux account; created on the host for `admins` and `users` alike). `litellm`: LiteLLM UI SSO, in addition to `users` or `admins`; keep it to 5 people (LiteLLM's free SSO limit) |
 
 Add people with `scripts/add-user.sh <username> <email> [users|admins] [display name]`: it creates the account with a random, never-shown password and rejects duplicates; the person sets their own via **Reset password**. Remove a person by deleting their block from the file and revoking their devices in the dashboard. Every protected path needs a second factor (TOTP and passkeys both work; passkeys are second-factor only). If someone loses all factors:
 
@@ -75,16 +75,22 @@ docker compose exec authelia authelia storage user webauthn delete <username> --
 
 | File | What to change |
 |---|---|
-| `authelia/configuration.yml` | Templated from `.env`. Session lengths, lockout, access rules (`group:admins` / `group:users` per path; `/llm` is `admins` + `litellm`), the OIDC clients (`portainer`, `grafana`, `litellm`) and their authorization policies. Notifier switches on `SMTP_ADDRESS` |
-| `caddy/Caddyfile` | Routes. Listeners `127.0.0.1:9080` (Funnel target), `https://172.17.0.1:8443` (sandbox MCP; must equal `MCP_URL` in `nemoclaw-setup.sh`) and `http://172.17.0.1:9081` (OIDC token/userinfo for Grafana, LiteLLM, Portainer); upstream ports must match `compose.yaml` |
-| `litellm/config.yaml` | Model names (`agent`, `qwen3.6-35b`), the `comfy_image` MCP server, 900 s timeouts (must exceed a vLLM cold start), `trusted_proxy_ranges` (Docker address pools) |
-| `model-runner/llama-swap.yaml` | The vLLM command: model ID, `--served-model-name` (matches LiteLLM and Prometheus), fixed port `10001`, `--gpu-memory-utilization 0.30`, `--max-model-len 262144` (keep equal to OpenClaw's context window), `--tool-call-parser qwen3_coder` (wrong value = empty `tool_calls`), `ttl: 0` + `preload` (always loaded). Hot-reloads and restarts vLLM: 3 to 4 minutes |
+| `authelia/configuration.yml` | Templated from `.env`. Session lengths, lockout, access rules (`group:admins` / `group:users` per path; `/llm` is `admins` + `litellm`; `/comfy` admins only), the OIDC clients (`portainer`, `grafana`, `jupyterhub`, `minio`, `litellm`) and their authorization policies. Notifier switches on `SMTP_ADDRESS` |
+| `caddy/Caddyfile` | Routes. Listeners `127.0.0.1:9080` (Funnel target), `https://172.17.0.1:8443` (sandbox MCP; must equal `MCP_URL` in `nemoclaw-setup.sh`) `http://172.17.0.1:9081` (OIDC token/userinfo for Grafana, LiteLLM, Portainer, JupyterHub) and `https://<PUBLIC_HOST>` on `172.17.0.1:443` (OIDC discovery for MinIO, Caddy's internal CA); upstream ports must match `compose.yaml`. `/brand/*` and `/favicon.ico` serve `branding/` |
+| `litellm/config.yaml` | Model names (`agent`, `qwen3.6-35b`, `whisper`, `kokoro`; aliases `whisper-1`, `tts-1`; the dashboard's *Models* tab reads this file), the `comfy_image` MCP server, 900 s timeouts (must exceed a vLLM cold start), `trusted_proxy_ranges` (Docker address pools) |
+| `model-runner/llama-swap.yaml` | The vLLM command: model ID, `--served-model-name` (matches LiteLLM and Prometheus), fixed port `10001`, `--gpu-memory-utilization 0.30`, `--max-model-len 262144` (keep equal to OpenClaw's context window), `--tool-call-parser qwen3_coder` (wrong value = empty `tool_calls`), `ttl: 0` + `preload` (always loaded). Whisper on port `10002` with `ttl: 300` and the two `sm_121` attention flags; the `groups` keep it from evicting Qwen. Hot-reloads and restarts vLLM: 3 to 4 minutes |
 | `comfyui/workflows/flux-schnell-api.json` | `ckpt_name` must exist in `${MODELS_DIR}/comfy/checkpoints/`. `comfy-mcp` and the dashboard warm-up address nodes `1`–`7` by ID |
 | `ops-bridge/actions.yaml` | The complete allow-list of container actions, per client token. Validated at start-up; the bridge refuses to start on a mistake. Header of the file documents every option |
 | `openclaw/openclaw.patch.json5` | Applied in the sandbox by `nemoclaw-setup.sh config` (`__PUBLIC_HOST__` filled from `.env`): public origin, base path `/openclaw`, allowed origins. `gateway.auth` stays unset on purpose |
+| `jupyterhub/jupyterhub_config.py` | OIDC client, `admin_groups`, spawn timeouts, idle culler (`--timeout=3600`) |
+| `jupyter/` | The notebook image: `Dockerfile` (packages, pinned LiteLLM library), `notebook-start` (per-person settings, example copy), `jupyter_server_config.py` (`frame-ancestors 'self'` for the Voilà panel), `examples/`. Rebuild with `docker compose --profile images build notebook-image` |
+| `minio/init.sh`, `minio/policies/` | Run by `minio-mc` at start: the `shared` bucket and the `admins` / `users` policies that the OIDC `groups` claim selects |
+| `ttyd/` | `gb10-shell` (signs the certificate, opens the SSH session), `shift-enter.js` (Shift+Enter for Claude Code) |
+| `host/` | Root-owned host side, installed with `sudo bash host/setup.sh` and `sudo bash host/elevate-setup.sh`; see `host/README.md`. Installed settings: `/etc/gb10/accounts.env` (`GB10_MEM_MAX`, `GB10_TASKS_MAX`, `GB10_CPU_QUOTA`) and `/etc/gb10/elevate.env` (default and maximum minutes, `GB10_ELEVATE_KEEP_DAYS`) |
+| `branding/` | Logo and favicon for Authelia, LiteLLM, Portainer, Grafana and the dashboard; regenerate the PNG/ICO files with `scripts/make-branding.py` (the SVGs are hand-written to match) |
 | `observability/*` | Prometheus targets and retention (30 d; Tempo 14 d), Alloy pipeline, Grafana provisioning and board |
 
-Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (link returned to the agent), `COMFY_INLINE_IMAGE=false` (inline images become huge base64 in OpenClaw's context), `COMFY_MAX_IMAGE_BYTES`, `COMFY_TIMEOUT_SECONDS`. Dashboard — `ADMIN_GROUP`, `USER_GROUP`, `BRIDGE_URL`, `OPENCLAW_ENROLL_MINUTES` (enrollment window, default 10). ops-bridge — `BRIDGE_MAX_CONCURRENT` (4). Model-runner — cache paths on the `vllm_cache` volume (reset: `docker volume rm ai-stack_vllm_cache`).
+Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (link returned to the agent), `COMFY_INLINE_IMAGE=false` (inline images become huge base64 in OpenClaw's context), `COMFY_MAX_IMAGE_BYTES`, `COMFY_TIMEOUT_SECONDS`. Dashboard — `ADMIN_GROUP`, `USER_GROUP`, `BRIDGE_URL`, `OPENCLAW_ENROLL_MINUTES` (enrollment window, default 10); it mounts `/run/gb10-elevate` for the sudo daemon's socket. JupyterHub — `NOTEBOOK_NETWORK` (`ai-stack_notebooks`). ops-bridge — `BRIDGE_MAX_CONCURRENT` (4). Model-runner — cache paths on the `vllm_cache` volume (reset: `docker volume rm ai-stack_vllm_cache`).
 
 ## Scripts
 
@@ -94,6 +100,7 @@ Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (l
 | `portainer-setup.sh` | `config`: Portainer environment, regular-user restrictions, `users` team, OAuth settings (re-runnable). `sso` / `local`: switch login between Authelia and Portainer accounts. Needs the license added in the UI first |
 | `create-litellm-keys.sh` | After LiteLLM is up. `LITELLM_API` overrides the URL. Edit the three key definitions for other limits; MCP access goes to `openclaw-sandbox` only |
 | `add-user.sh` | See Users |
+| `make-branding.py` | Regenerates `branding/logo.png`, `favicon.ico` and the Grafana icon PNGs (needs Pillow and DejaVu Sans Mono Bold) |
 | `nemoclaw-setup.sh` | `install`, `ca`, `onboard`, `mcp`, `config [--dry-run]`, `notes`; reads `.env` and `secrets/litellm_keys.json`, never prints keys. `onboard` sets build-time options (text+image input, reasoning, Caddy CA); change them only by running `onboard` again |
 
 ## Values that must match
@@ -102,8 +109,9 @@ Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (l
 |---|---|
 | `PUBLIC_HOST` | `.env` only; everything else derives from it |
 | `NEMOCLAW_SANDBOX` | `.env` → `nemoclaw-setup.sh`, ops-bridge, dashboard |
+| `whisper` / `kokoro` | `litellm/config.yaml`, `llama-swap.yaml` (`whisper-large-v3-turbo`), the notebook key's model list in `ops-bridge/actions.yaml` |
 | `qwen3.6-35b` / `agent` | `llama-swap.yaml`, `litellm/config.yaml`, `create-litellm-keys.sh`, `prometheus.yml` (label), `nemoclaw-setup.sh` (`NEMOCLAW_MODEL=agent`) |
-| Port `10001` | `llama-swap.yaml`, `prometheus.yml` |
+| Ports `10001` (Qwen), `10002` (Whisper) | `llama-swap.yaml`, `prometheus.yml` |
 | `/llm` root path | `compose.yaml` (`SERVER_ROOT_PATH`), Caddyfile, `prometheus.yml`, `create-litellm-keys.sh`, NemoClaw provider URL |
 | `admins` / `users` groups | `users.yml`, `authelia/configuration.yml`, `compose.yaml` (`ADMIN_GROUP`, `USER_GROUP`) |
 | `/connect` | Caddyfile route, Authelia rule, `dashboard/app.py` |
@@ -115,10 +123,13 @@ Container environment (in `compose.yaml`): `comfy-mcp` — `COMFY_PUBLIC_URL` (l
 | `ssh_ca` | ttyd secret; `ssh_ca.pub` is for the host's sshd (`host/`) |
 | `TTYD_UID`, `TTYD_GID` | `.env` → `ttyd` (`user:`) |
 | `MINIO_IMAGE`, `MC_IMAGE` | `.env` → `minio`, `minio-mc` |
-| Host ports 9091, 4000, 3000, 8188, 9000, 9010, 9080, 18789 | `compose.yaml` and Caddyfile (`18789` is the sandbox forward NemoClaw creates) |
+| Host ports 9091, 4000, 3000, 8000, 8188, 9000, 9001, 9010, 9080, 18789 | `compose.yaml` and Caddyfile (`18789` is the sandbox forward NemoClaw creates) |
 | `DOCKER_BRIDGE_IP` | `.env` = `openshell-docker` gateway = `host.openshell.internal` inside the sandbox |
-| OIDC clients `portainer`, `grafana`, `litellm` | `authelia/configuration.yml` (client ids, redirect URIs, `token_endpoint_auth_method`), `compose.yaml` (Grafana and LiteLLM env), `scripts/portainer-setup.sh`. Redirects: `/portainer/`, `/grafana/login/generic_oauth`, `/llm/sso/callback` |
-| OIDC token listener `172.17.0.1:9081` | Caddyfile, `compose.yaml` (Grafana, LiteLLM), `scripts/portainer-setup.sh` |
+| OIDC clients `portainer`, `grafana`, `litellm`, `jupyterhub`, `minio` | `authelia/configuration.yml` (client ids, redirect URIs, `token_endpoint_auth_method`), `compose.yaml` (Grafana, LiteLLM, MinIO env), `jupyterhub/jupyterhub_config.py`, `scripts/portainer-setup.sh`. Redirects: `/portainer/`, `/grafana/login/generic_oauth`, `/llm/sso/callback`, `/jupyter/hub/oauth_callback`, `/s3/oauth_callback` |
+| OIDC token listener `172.17.0.1:9081` | Caddyfile, `compose.yaml` (Grafana, LiteLLM), `jupyterhub_config.py`, `scripts/portainer-setup.sh` |
+| MinIO OIDC alias `<PUBLIC_HOST>` → `172.17.0.1:443` | Caddyfile (last site block), `compose.yaml` (`minio` `extra_hosts`, `data/caddy-root.crt`) |
+| Dashboard uid `10001` | `dashboard/Dockerfile` (`USER app`), owner of `/run/gb10-elevate/web.sock` set by `host/elevate-setup.sh` |
+| Account uid range 20000-29999 | `host/sync-accounts.sh`, `host/gb10-users.nft`, `host/gb10-elevated`, the auditd rule `host/gb10-elevate.audit.rules` |
 | `--max-model-len` = OpenClaw context window | `llama-swap.yaml`, `scripts/nemoclaw-setup.sh` (`NEMOCLAW_CONTEXT_WINDOW`), and the live `contextWindow` in the sandbox's `openclaw.json` (`openclaw config patch`; the onboard value only applies to a fresh onboard) |
 | `litellm` group | `users.yml`, the `litellm` OIDC authorization policy and the `/llm` rule in `authelia/configuration.yml`; at most 5 members (LiteLLM's free SSO limit) |
 | MCP listener `172.17.0.1:8443` | Caddyfile, `nemoclaw-setup.sh` (`MCP_URL`, `--trusted-private-host`) |

@@ -1,6 +1,6 @@
 # Host side of the browser terminal
 
-`/term/` opens a shell on **this machine** in the browser, as the person's own Linux account (no sudo, no docker group). The stack side
+`/term/` opens a shell on **this machine** in the browser, as the person's own Linux account (no sudo, no docker group; admins can take [temporary sudo](#temporary-sudo-admins-only)). The stack side
 (ttyd, Caddy route, Authelia rule, the CA key `secrets/ssh_ca`) is in `compose.yaml`; this folder is the part that needs root.
 
 ## Install
@@ -37,8 +37,8 @@ no docker, password `*`, home mode 750, and limits through `user-<uid>.slice` (d
 
 ## Temporary sudo (admins only)
 
-Accounts have no sudo. An admin can get it for a short time from the dashboard (`/home/`, **Temporary sudo** card: a reason of 5-200 characters and 5/15/30/60 minutes;
-the page is behind Authelia two-factor, nobody else has to approve). Install: `sudo bash host/elevate-setup.sh` (then `docker compose up -d --build admin-dashboard`).
+Accounts have no sudo. An admin can get it for a short time from the dashboard (`/home/`, **Temporary sudo** tab: a reason of 5-200 characters and 5/15/30/60 minutes;
+the page is behind Authelia two-factor, nobody else has to approve). Install: `sudo bash host/elevate-setup.sh` (then `docker compose up -d --build admin-dashboard`). `--no-auditd` installs without the auditd rule.
 
 - A grant is one file, `/etc/sudoers.d/gb10-grant-<uid>`, checked with `visudo -cf` before it goes live. It lasts until it expires or the person presses **End now** /
   types `gb10-elevate drop`; then the file is removed and every root process of that login (`sudo -s`, `sudo -i`, a command under sudo) gets SIGHUP, and SIGKILL 5 s later.
@@ -48,7 +48,7 @@ the page is behind Authelia two-factor, nobody else has to approve). Install: `s
   `status` and `drop` for itself, identified by SO_PEERCRED). `gb10-elevate` in the terminal is the client of the second one and cannot grant.
 - Audit, kept 30 days (`GB10_ELEVATE_KEEP_DAYS` in `/etc/gb10/elevate.env`, pruned hourly): the grant log `/var/log/gb10-elevate/grants-YYYY-MM-DD.jsonl` (who, when, reason, minutes,
   source address, how it ended; append-only attribute set), sudo's full input/output recordings in `/var/log/sudo-io` (replay: unpack the download, `sudoreplay -d sudo-io <id>`),
-  sudo's normal syslog lines, and an auditd rule (`sudo ausearch -k gb10-elevated -i`) for every program run as root by a browser-terminal login. The dashboard card lists events and
+  sudo's normal syslog lines, and an auditd rule (`sudo ausearch -k gb10-elevated -i`) for every program run as root by a browser-terminal login. The dashboard tab lists events and
   recorded commands and has download links (grant log, everything, one recording).
 - Limits: root can remove its own traces (`chattr -a`, deleting recordings), so this is a deterrent plus a record, not tamper-proof; copy the logs off the machine if you need that.
   A root process that outlives the grant on purpose (a container started with `docker run -d`, a cron job, a changed file) is not stopped: read the recording. Root also bypasses the
@@ -59,6 +59,7 @@ the page is behind Authelia two-factor, nobody else has to approve). Install: `s
 
 ```bash
 systemctl status gb10-sshd                 # active; listening on 172.17.0.1:2222
+systemctl status gb10-elevated             # only with elevate-setup.sh; web.sock and user.sock in /run/gb10-elevate
 sudo nft list table inet gb10_users        # the per-user block is loaded
 getent group gb10-users                    # the accounts
 # in the browser: https://<your host>/term/  (Authelia, two-factor), then in the terminal:
