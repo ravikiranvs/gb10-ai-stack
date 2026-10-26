@@ -29,8 +29,13 @@ hash="$(az authelia crypto hash generate argon2 --password "$(openssl rand -base
 [[ "$hash" == '$argon2id$'* ]] || { echo "could not generate the password hash" >&2; exit 1; }
 
 # Append in place (not replace) so the bind mount keeps working. Add a newline first if the file lacks one.
+# Authelia rewrites the file with 4-space indentation when a person resets a password or enrols a device, so match whatever the first user uses.
+ind="$(az sed -n 's/^\( \+\)[^ #].*:.*$/\1/p' /config/users.yml | head -n1 | tr -d '\r')"
+[[ -n "$ind" ]] || ind="  "
 {
-  printf '\n  %s:\n    displayname: %s\n    email: %s\n    password: '"'"'%s'"'"'\n    groups:\n      - %s\n' "$user" "'$display'" "$email" "$hash" "${group//,/$'\n'      - }"
+  printf '\n%s%s:\n%s%sdisplayname: %s\n%s%semail: %s\n%s%spassword: '"'"'%s'"'"'\n%s%sgroups:\n' \
+    "$ind" "$user" "$ind" "$ind" "'$display'" "$ind" "$ind" "$email" "$ind" "$ind" "$hash" "$ind" "$ind"
+  for g in ${group//,/ }; do printf '%s%s%s- %s\n' "$ind" "$ind" "$ind" "$g"; done
 } | az sh -c '[ -z "$(tail -c1 /config/users.yml)" ] || echo >> /config/users.yml; cat >> /config/users.yml'
 
 echo "added '$user' <$email> to group '$group'"
